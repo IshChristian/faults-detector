@@ -1,0 +1,200 @@
+# VisionGuard AI — deployment stack
+#
+# Profiles keep the stack small on low-RAM machines:
+#   docker compose up -d                          -> core: backend, worker, dashboard, frigate, mqtt, postgres, valkey
+#   docker compose --profile labeling up -d       -> + Label Studio
+#   docker compose --profile automation up -d     -> + Node-RED (optional downstream integrations only)
+#
+# Security model (see 11-security-privacy-policy.md):
+#   - Every service sits on the private "internal" network.
+#   - Host ports bind to ${BIND_ADDR} (default 127.0.0.1). In production a reverse
+#     proxy (Coolify/Traefik or Caddy) terminates HTTPS and is the only public entry.
+#   - All secrets come from .env (copy .env.example). Nothing secret lives in this file.
+#
+# Image tags are pinned. Bump them deliberately after testing, never use :latest.
+
+name: visionguard
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  backend:
+    build: ./backend
+    <<: [*restart, *logging]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://valkey:6379/0
+      MQTT_HOST: mqtt
+      MQTT_PORT: 1883
+      FRIGATE_URL: http://frigate:5000
+      MEDIA_ROOT: /app/media
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8100}:8000"   # 8000 on the host is reserved for Coolify
+    depends_on:
+      postgres: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+      mqtt: { condition: service_started }
+    volumes:
+      - ./models:/app/models
+      - ./datasets:/app/datasets
+      - media_data:/app/media
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [internal]
+
+  # Background jobs: rule evaluation, alert delivery with retries, clip export,
+  # retention cleanup, training jobs. Same image as backend, different command.
+  worker:
+    build: ./backend
+    <<: [*restart, *logging]
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://valkey:6379/0
+      MQTT_HOST: mqtt
+      MQTT_PORT: 1883
+      FRIGATE_URL: http://frigate:5000
+      MEDIA_ROOT: /app/media
+    depends_on:
+      postgres: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+    volumes:
+      - ./models:/app/models
+      - ./datasets:/app/datasets
+      - media_data:/app/media
+    networks: [internal]
+
+  dashboard:
+    build: ./dashboard
+    <<: [*restart, *logging]
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"   # Streamlit's default port
+    depends_on:
+      backend: { condition: service_healthy }
+    networks: [internal]
+
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:0.17.2
+    <<: [*restart, *logging]
+    shm_size: "256mb"          # ~64 MB per 720p detect stream; raise for more cameras
+    env_file: .env             # provides FRIGATE_MQTT_* and FRIGATE_RTSP_* used in frigate/config.yml
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8971:8971"   # authenticated Frigate UI/API (use this, not 5000)
+      - "${BIND_ADDR:-127.0.0.1}:8554:8554"   # go2rtc RTSP restream
+      - "${BIND_ADDR:-127.0.0.1}:8555:8555/tcp"   # WebRTC for live view
+      - "${BIND_ADDR:-127.0.0.1}:8555:8555/udp"
+    # Port 5000 (unauthenticated API) is intentionally NOT published; the backend reaches it on the internal network.
+    volumes:
+      - ./frigate/config.yml:/config/config.yml
+      - frigate_media:/media/frigate
+      - /etc/localtime:/etc/localtime:ro
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs: { size: 1000000000 }
+    # devices:                  # uncomment for Intel iGPU (VAAPI / OpenVINO GPU) acceleration
+    #   - /dev/dri/renderD128:/dev/dri/renderD128
+    depends_on:
+      - mqtt
+    networks: [internal]
+
+  mqtt:
+    image: eclipse-mosquitto:2.0.20
+    <<: [*restart, *logging]
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config      # mosquitto.conf, passwd, acl (passwd/acl are git-ignored)
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    networks: [internal]
+
+  postgres:
+    image: postgres:16.4-alpine
+    <<: [*restart, *logging]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # No host port. For local inspection use: docker compose exec postgres psql -U $POSTGRES_USER $POSTGRES_DB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+  # Job queue, rule-state cache (persistence counters, cooldowns), live-event pub/sub.
+  # Valkey is the BSD-licensed, protocol-compatible fork of Redis.
+  valkey:
+    image: valkey/valkey:8.0.1-alpine
+    <<: [*restart, *logging]
+    command: ["valkey-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [internal]
+
+  label-studio:
+    image: heartexlabs/label-studio:1.13.1
+    profiles: [labeling]
+    <<: [*restart, *logging]
+    environment:
+      LABEL_STUDIO_HOST: ${LABEL_STUDIO_HOST:-http://localhost:8080}
+      LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+      LABEL_STUDIO_USERNAME: ${LABEL_STUDIO_USERNAME}
+      LABEL_STUDIO_PASSWORD: ${LABEL_STUDIO_PASSWORD}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8080:8080"
+    volumes:
+      - labelstudio_data:/label-studio/data
+    networks: [internal]
+
+  # Optional. The backend owns rule evaluation and alerting; Node-RED only consumes
+  # visionguard/events/# for customer-specific integrations (PLC, siren, POS).
+  node-red:
+    image: nodered/node-red:4.0.5
+    profiles: [automation]
+    <<: [*restart, *logging]
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:1880:1880"
+    volumes:
+      - nodered_data:/data
+    depends_on:
+      - mqtt
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  frigate_media:
+  mosquitto_data:
+  mosquitto_log:
+  postgres_data:
+  valkey_data:
+  labelstudio_data:
+  nodered_data:
+  media_data:

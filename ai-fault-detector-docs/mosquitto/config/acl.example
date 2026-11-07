@@ -1,0 +1,15 @@
+# Copy to mosquitto/config/acl. Least privilege per client.
+
+# Frigate publishes its own topics only
+user frigate
+topic readwrite frigate/#
+
+# Backend reads Frigate, owns visionguard/*
+user visionguard_backend
+topic read frigate/#
+topic readwrite visionguard/#
+
+# Node-RED (optional) consumes events and may only request actions
+user nodered
+topic read visionguard/events/#
+topic write visionguard/actions/requests

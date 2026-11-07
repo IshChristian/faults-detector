@@ -1,0 +1,159 @@
+# Frigate 0.17.x configuration for VisionGuard AI.
+#
+# Conventions:
+#  - Secrets: {FRIGATE_*} placeholders are substituted from environment variables (.env). Never hard-code credentials.
+#  - Streams: low-res SUB-stream for detect (cheap), high-res MAIN stream for record (evidence).
+#    Stream paths below are Hikvision/Dahua-style examples; check your camera's RTSP paths.
+#  - Zones: RELATIVE coordinates (0.0–1.0 of frame width/height), so they stay valid if detect resolution changes.
+#    Draw them in the Frigate UI (Settings > Masks/Zones) and paste the result here.
+#  - Frigate does detection + tracking + recording only. VisionGuard's backend evaluates business rules
+#    (counts, durations, schedules, cooldowns) from Frigate's MQTT messages — see 08-rules-and-actions.md.
+
+mqtt:
+  enabled: true
+  host: mqtt
+  port: 1883
+  user: "{FRIGATE_MQTT_USER}"
+  password: "{FRIGATE_MQTT_PASSWORD}"
+  topic_prefix: frigate
+
+# --- Detector --------------------------------------------------------------
+# The plain "cpu" detector is a last resort (Frigate itself recommends against it).
+# On any x86 CPU, OpenVINO is several times faster; with an Intel iGPU set device: GPU.
+detectors:
+  ov:
+    type: openvino
+    device: CPU
+
+model:
+  width: 300
+  height: 300
+  input_tensor: nhwc
+  input_pixel_format: bgr
+  path: /openvino-model/ssdlite_mobilenet_v2.xml
+  labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+# Custom VisionGuard models are exported to ONNX/OpenVINO and swapped in here
+# (see 14-model-training-guide.md, "Deploy to Frigate").
+
+# --- Live view / restreaming ----------------------------------------------
+go2rtc:
+  streams:
+    entrance:
+      - "rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_ENTRANCE_HOST}:554/Streaming/Channels/101"
+    entrance_sub:
+      - "rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_ENTRANCE_HOST}:554/Streaming/Channels/102"
+    dining_area:
+      - "rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_DINING_HOST}:554/Streaming/Channels/101"
+    dining_area_sub:
+      - "rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_DINING_HOST}:554/Streaming/Channels/102"
+    football_pitch:
+      - "rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_PITCH_HOST}:554/Streaming/Channels/101"
+    football_pitch_sub:
+      - "rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_PITCH_HOST}:554/Streaming/Channels/102"
+
+# --- Defaults applied to every camera ------------------------------------
+ffmpeg:
+  # hwaccel_args: preset-vaapi        # enable with /dev/dri mapped in docker-compose.yml
+  output_args:
+    record: preset-record-generic-audio-copy
+
+record:
+  enabled: true
+  # Keep only reviewable footage by default (data minimisation, 11-security-privacy-policy.md).
+  alerts:
+    retain:
+      days: 14
+  detections:
+    retain:
+      days: 14
+
+snapshots:
+  enabled: true
+  bounding_box: true
+  retain:
+    default: 14
+
+objects:
+  filters:
+    person:
+      min_score: 0.5
+      threshold: 0.7
+
+# --- Cameras ---------------------------------------------------------------
+cameras:
+  entrance:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/entrance_sub
+          input_args: preset-rtsp-restream
+          roles: [detect]
+        - path: rtsp://127.0.0.1:8554/entrance
+          input_args: preset-rtsp-restream
+          roles: [record]
+    detect:
+      width: 640
+      height: 360
+      fps: 5
+    objects:
+      track: [person, car, motorcycle]
+    zones:
+      restricted_area:
+        coordinates: 0.60,0.20,0.95,0.20,0.95,0.90,0.60,0.90
+        objects: [person]
+        inertia: 3          # frames an object must be inside before it counts as entered
+        loitering_time: 0   # VisionGuard rules handle dwell time
+
+  dining_area:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/dining_area_sub
+          input_args: preset-rtsp-restream
+          roles: [detect]
+        - path: rtsp://127.0.0.1:8554/dining_area
+          input_args: preset-rtsp-restream
+          roles: [record]
+    detect:
+      width: 640
+      height: 360
+      fps: 5
+    objects:
+      track: [person]
+    zones:
+      queue_zone:
+        coordinates: 0.08,0.28,0.45,0.28,0.45,0.95,0.08,0.95
+        objects: [person]
+        inertia: 3
+      dining_zone:
+        coordinates: 0.50,0.15,0.95,0.15,0.95,0.95,0.50,0.95
+        objects: [person]
+        inertia: 3
+
+  football_pitch:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/football_pitch_sub
+          input_args: preset-rtsp-restream
+          roles: [detect]
+        - path: rtsp://127.0.0.1:8554/football_pitch
+          input_args: preset-rtsp-restream
+          roles: [record]
+    detect:
+      width: 960
+      height: 540
+      fps: 10               # ball is small and fast; needs higher fps than people-only cameras
+    objects:
+      track: [person, sports ball]
+      filters:
+        sports ball:
+          min_score: 0.4
+          threshold: 0.55
+    zones:
+      pitch:
+        coordinates: 0.04,0.08,0.96,0.08,0.96,0.94,0.04,0.94
+        inertia: 3
+      goal_area:
+        coordinates: 0.04,0.38,0.24,0.38,0.24,0.74,0.04,0.74
+        inertia: 3

@@ -1,0 +1,10 @@
+.env
+mosquitto/config/passwd
+mosquitto/config/acl
+models/
+datasets/
+media/
+*.pt
+*.onnx
+__pycache__/
+.venv/

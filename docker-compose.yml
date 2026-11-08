@@ -1,7 +1,7 @@
 # VisionGuard AI — deployment stack
 #
 # Profiles keep the stack small on low-RAM machines:
-#   docker compose up -d                          -> core: backend, worker, dashboard, frigate, mqtt, postgres, valkey
+#   docker compose up -d                          -> core: backend, worker, worker-sessions, dashboard, frigate, mqtt, postgres, valkey
 #   docker compose --profile labeling up -d       -> + Label Studio
 #   docker compose --profile automation up -d     -> + Node-RED (optional downstream integrations only)
 #
@@ -56,27 +56,39 @@ services:
       retries: 3
     networks: [internal]
 
-  # Background jobs: rule evaluation, alert delivery with retries, clip export,
-  # retention cleanup, training jobs. Same image as backend, different command.
+  # Background jobs on the "default" queue: alert delivery with retries, clip export,
+  # retention cleanup. Same image as backend, different command.
   worker:
     build: ./backend
     <<: [*restart, *logging]
-    command: ["python", "-m", "app.worker"]
+    command: ["rq", "worker", "default", "--url", "redis://valkey:6379/0"]
     env_file: .env
-    environment:
+    environment: &worker_env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://valkey:6379/0
       MQTT_HOST: mqtt
       MQTT_PORT: 1883
       FRIGATE_URL: http://frigate:5000
       MEDIA_ROOT: /app/media
-    depends_on:
-      postgres: { condition: service_healthy }
+    depends_on: &worker_depends
+      backend: { condition: service_healthy }   # backend runs the migrations first
       valkey: { condition: service_healthy }
-    volumes:
+    volumes: &worker_volumes
       - ./models:/app/models
       - ./datasets:/app/datasets
       - media_data:/app/media
+    networks: [internal]
+
+  # Upload-session processing (hours per job). One process = concurrency 1, so it can
+  # never starve the default queue (V1 spec §4).
+  worker-sessions:
+    build: ./backend
+    <<: [*restart, *logging]
+    command: ["rq", "worker", "sessions", "--url", "redis://valkey:6379/0"]
+    env_file: .env
+    environment: *worker_env
+    depends_on: *worker_depends
+    volumes: *worker_volumes
     networks: [internal]
 
   dashboard:

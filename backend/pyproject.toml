@@ -14,6 +14,7 @@ dependencies = [
     "cryptography==44.0.0",
     "pyjwt==2.10.1",
     "redis==5.2.1",
+    "rq==2.1.0",
 ]
 
 [dependency-groups]
@@ -33,3 +34,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 pythonpath = ["."]
 testpaths = ["tests"]
+filterwarnings = [
+    # fakeredis lacks CLIENT SETNAME; real Valkey supports it.
+    "ignore:CLIENT SETNAME command not supported:Warning",
+]

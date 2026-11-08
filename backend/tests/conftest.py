@@ -39,7 +39,12 @@ os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6380/0")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production-0123456789")
 os.environ.setdefault("CREDENTIALS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+os.environ.setdefault("COOKIE_SECURE", "false")  # the test client talks plain http
 
+import fakeredis  # noqa: E402
+
+from app.auth.security import create_access_token, hash_password  # noqa: E402
+from app.cache import get_redis  # noqa: E402
 from app.db import get_session  # noqa: E402  (settings env must be set first)
 from app.main import create_app  # noqa: E402
 from app.models import Customer, User  # noqa: E402
@@ -91,7 +96,9 @@ async def client(db_session):
     async def _session_override():
         yield db_session
 
+    redis = fakeredis.FakeAsyncRedis()
     app.dependency_overrides[get_session] = _session_override
+    app.dependency_overrides[get_redis] = lambda: redis
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
@@ -110,17 +117,13 @@ def make_customer(db_session):
 
 @pytest.fixture
 def make_user(db_session):
-    from argon2 import PasswordHasher
-
-    hasher = PasswordHasher()
-
     async def _make(customer: Customer | None, role: str, email: str | None = None,
                     password: str = "Passw0rd!long", **kw) -> User:
         user = User(
             customer_id=customer.id if customer else None,
             email=email or f"user-{uuid.uuid4().hex[:8]}@example.com",
             full_name=kw.pop("full_name", "Test User"),
-            password_hash=hasher.hash(password),
+            password_hash=hash_password(password),
             role=role,
             **kw,
         )
@@ -128,3 +131,10 @@ def make_user(db_session):
         await db_session.flush()
         return user
     return _make
+
+
+@pytest.fixture
+def auth_headers():
+    def _headers(user: User) -> dict:
+        return {"Authorization": f"Bearer {create_access_token(user)}"}
+    return _headers

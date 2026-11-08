@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     default_timezone: str = "Africa/Kigali"
     login_rate_limit_per_minute: int = 5
     cookie_secure: bool = True
+    storage_backend: str = "local"
 
 
 @lru_cache

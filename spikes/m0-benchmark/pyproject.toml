@@ -1,0 +1,26 @@
+# M0 benchmark spike: throwaway, never imported by backend/.
+[project]
+name = "m0-benchmark"
+version = "0.0.0"
+requires-python = "==3.11.*"
+dependencies = [
+    "rfdetr==1.2.1",
+    "supervision==0.26.1",
+    "opencv-python==4.11.0.86",
+    "numpy<2.3",
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+]
+
+[tool.uv]
+package = false
+
+# CPU-only PyTorch (~200 MB) instead of the default CUDA build (several GB). The laptop has no GPU.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }

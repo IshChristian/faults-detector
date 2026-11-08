@@ -10,3 +10,6 @@
 *.onnx
 __pycache__/
 .venv/
+
+# Spike outputs
+spikes/**/out/

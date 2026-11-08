@@ -1,0 +1,42 @@
+/* Design tokens, verbatim from 16-ui-ux-design-document.pdf §12. */
+:root {
+  --bg-page: #F4F2EF;
+  --surface: #FFFFFF;
+  --text-primary: #232323;
+  --text-secondary: #6E6A66;
+  --text-muted: #9C968F;
+  --divider: #E7E3DE;
+  --brand: #F26B5B;
+  --brand-soft: #FAD9CE;
+  --brand-blush: #F7E3DC;
+  --success: #3E9B6C;
+  --warning: #E0A63C;
+  --danger: #D64545;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+  --shadow-card: 0 10px 30px rgba(35,35,35,0.06);
+  --shadow-float: 0 18px 45px rgba(35,35,35,0.10);
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+}
+
+html { background: var(--bg-page); }
+
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular numerals for counts, confidence, timestamps and IDs (UI doc §3). */
+.num { font-variant-numeric: tabular-nums; }

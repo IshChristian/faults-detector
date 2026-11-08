@@ -79,6 +79,7 @@ async def test_patch_and_delete_site(client, db_session, tenant):
 async def test_site_create_is_audited(client, db_session, tenant):
     c, u, h = await tenant()
     site = (await client.post("/api/v1/sites", json={"name": "A"}, headers=h)).json()
-    row = (await db_session.execute(select(AuditLog).where(AuditLog.action == "site.create"))).scalar_one()
-    assert row.actor_user_id == u.id and row.customer_id == c.id
+    row = (await db_session.execute(select(AuditLog).where(
+        AuditLog.action == "site.create", AuditLog.actor_user_id == u.id))).scalar_one()
+    assert row.customer_id == c.id
     assert str(row.entity_id) == site["id"] and row.entity_type == "site"

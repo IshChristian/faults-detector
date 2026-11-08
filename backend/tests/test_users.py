@@ -85,7 +85,8 @@ async def test_other_customers_user_is_404_and_not_listed(client, tenant):
 
 
 async def test_user_create_is_audited_without_password(client, db_session, tenant):
-    _, _, h = await tenant()
+    c, _, h = await tenant()
     await client.post("/api/v1/users", json=NEW, headers=h)
-    row = (await db_session.execute(select(AuditLog).where(AuditLog.action == "user.create"))).scalar_one()
+    row = (await db_session.execute(select(AuditLog).where(
+        AuditLog.action == "user.create", AuditLog.customer_id == c.id))).scalar_one()
     assert NEW["password"] not in str(row.details)

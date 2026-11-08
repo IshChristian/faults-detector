@@ -15,7 +15,8 @@ async def test_create_customer_with_admin_then_admin_can_login(client, db_sessio
     assert admin.email == "admin@academy.rw"
     r = await client.post("/api/v1/auth/login", json={"email": "admin@academy.rw", "password": PW})
     assert r.status_code == 200 and r.json()["user"]["customer_industry"] == "sports"
-    actions = set((await db_session.execute(select(AuditLog.action))).scalars())
+    actions = set((await db_session.execute(
+        select(AuditLog.action).where(AuditLog.customer_id == customer.id))).scalars())
     assert "cli.create_customer" in actions
 
 

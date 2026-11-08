@@ -3,6 +3,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.service import record_audit
 from app.auth import service
 from app.auth.deps import CurrentUser, get_current_user
 from app.auth.ratelimit import check_login_rate
@@ -30,6 +31,10 @@ async def _user_out(session: AsyncSession, user: User) -> UserOut:
                    customer_id=user.customer_id, customer_industry=await service.customer_industry(session, user))
 
 
+def _actor(user: User) -> CurrentUser:
+    return CurrentUser(id=user.id, customer_id=user.customer_id, role=user.role, email=user.email)
+
+
 def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
@@ -39,9 +44,18 @@ async def login(body: LoginRequest, request: Request, response: Response,
                 session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)):
     s = get_settings()
     await check_login_rate(redis, _client_ip(request), body.email, s.login_rate_limit_per_minute)
-    user = await service.authenticate(session, body.email, body.password)
+    ip = _client_ip(request)
+    try:
+        user = await service.authenticate(session, body.email, body.password)
+    except ApiError:
+        # Keep the failed attempt even though the request fails.
+        await record_audit(session, action="auth.login_failed", customer_id=None,
+                           details={"email": body.email.strip().lower()}, ip=ip)
+        await session.commit()
+        raise
     access, raw = await service.issue_tokens(session, user)
     user.last_login_at = func.now()
+    await record_audit(session, action="auth.login", customer_id=user.customer_id, actor=_actor(user), ip=ip)
     await session.flush()
     await session.refresh(user)
     _set_refresh_cookie(response, raw)
@@ -64,11 +78,12 @@ async def refresh(response: Response, body: RefreshRequest | None = Body(None),
 
 
 @router.post("/logout", status_code=204)
-async def logout(body: RefreshRequest | None = Body(None), vg_refresh: str | None = Cookie(None),
+async def logout(request: Request, body: RefreshRequest | None = Body(None), vg_refresh: str | None = Cookie(None),
                  session: AsyncSession = Depends(get_session)):
     raw = (body.refresh_token if body else None) or vg_refresh
-    if raw:
-        await service.revoke(session, raw)
+    if raw and (user := await service.revoke(session, raw)):
+        await record_audit(session, action="auth.logout", customer_id=user.customer_id, actor=_actor(user),
+                           ip=_client_ip(request))
     response = Response(status_code=204)
     response.delete_cookie(COOKIE_NAME, path=COOKIE_PATH)
     return response

@@ -66,11 +66,14 @@ async def rotate(session: AsyncSession, raw: str) -> tuple[User, str, str]:
     return user, access, new_raw
 
 
-async def revoke(session: AsyncSession, raw: str) -> None:
-    await session.execute(
+async def revoke(session: AsyncSession, raw: str) -> User | None:
+    """Revoke one refresh token; returns its owner if the token was live."""
+    user_id = (await session.execute(
         update(RefreshToken)
         .where(RefreshToken.token_hash == hash_refresh_token(raw), RefreshToken.revoked_at.is_(None))
-        .values(revoked_at=func.now()))
+        .values(revoked_at=func.now())
+        .returning(RefreshToken.user_id))).scalar_one_or_none()
+    return await session.get(User, user_id) if user_id else None
 
 
 async def customer_industry(session: AsyncSession, user: User) -> str | None:

@@ -37,3 +37,13 @@ test("wrong password shows the problem detail message and stays on /login", asyn
   expect(await screen.findByRole("alert")).toHaveTextContent("Invalid email or password");
   expect(window.location.pathname).toBe("/login");
 });
+
+test("after signing in, the user returns to the page they first asked for", async () => {
+  renderAt("/cameras");
+  const user = userEvent.setup();
+  await user.type(await screen.findByLabelText(/email/i), "coach@academy.rw");
+  await user.type(screen.getByLabelText(/password/i), "Passw0rd!long");
+  await user.click(screen.getByRole("button", { name: /sign in/i }));
+  expect(await screen.findByRole("heading", { name: /cameras & screens/i })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/cameras");
+});

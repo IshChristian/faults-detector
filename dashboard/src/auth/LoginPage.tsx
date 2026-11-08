@@ -1,12 +1,11 @@
 import { useState, type FormEvent } from "react";
-import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { ApiProblem } from "../api/client";
 import { useAuth } from "./AuthContext";
 import { homePath } from "./types";
 
 export function LoginPage() {
   const { login, status, user } = useAuth();
-  const navigate = useNavigate();
   const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,8 +22,8 @@ export function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
+      // On success the auth status changes and the <Navigate> above sends the user on.
       await login(email, password);
-      navigate("/", { replace: true });
     } catch (err) {
       setError(err instanceof ApiProblem ? err.detail || err.title : "Could not reach the server. Try again.");
     } finally {

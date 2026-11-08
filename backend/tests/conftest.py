@@ -138,3 +138,13 @@ def auth_headers():
     def _headers(user: User) -> dict:
         return {"Authorization": f"Bearer {create_access_token(user)}"}
     return _headers
+
+
+@pytest.fixture
+def tenant(make_customer, make_user, auth_headers):
+    """A customer with a user of the given role; returns (customer, user, headers)."""
+    async def _make(role: str = "customer_admin", **customer_kw):
+        customer = await make_customer(**customer_kw)
+        user = await make_user(customer, role)
+        return customer, user, auth_headers(user)
+    return _make

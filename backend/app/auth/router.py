@@ -10,6 +10,7 @@ from app.auth.ratelimit import check_login_rate
 from app.auth.schemas import LoginRequest, RefreshRequest, TokenResponse, UserOut
 from app.cache import get_redis
 from app.common.errors import ApiError
+from app.common.request import client_ip
 from app.config import get_settings
 from app.db import get_session
 from app.models import User
@@ -35,16 +36,12 @@ def _actor(user: User) -> CurrentUser:
     return CurrentUser(id=user.id, customer_id=user.customer_id, role=user.role, email=user.email)
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, request: Request, response: Response,
                 session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)):
     s = get_settings()
-    await check_login_rate(redis, _client_ip(request), body.email, s.login_rate_limit_per_minute)
-    ip = _client_ip(request)
+    await check_login_rate(redis, client_ip(request), body.email, s.login_rate_limit_per_minute)
+    ip = client_ip(request)
     try:
         user = await service.authenticate(session, body.email, body.password)
     except ApiError:
@@ -83,7 +80,7 @@ async def logout(request: Request, body: RefreshRequest | None = Body(None), vg_
     raw = (body.refresh_token if body else None) or vg_refresh
     if raw and (user := await service.revoke(session, raw)):
         await record_audit(session, action="auth.logout", customer_id=user.customer_id, actor=_actor(user),
-                           ip=_client_ip(request))
+                           ip=client_ip(request))
     response = Response(status_code=204)
     response.delete_cookie(COOKIE_NAME, path=COOKIE_PATH)
     return response

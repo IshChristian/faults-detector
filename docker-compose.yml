@@ -91,15 +91,19 @@ services:
     volumes: *worker_volumes
     networks: [internal]
 
+  # React app served by nginx, which also proxies /api to the backend (same origin).
   dashboard:
     build: ./dashboard
     <<: [*restart, *logging]
-    environment:
-      BACKEND_URL: http://backend:8000
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"   # Streamlit's default port
+      - "${BIND_ADDR:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"
     depends_on:
       backend: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8501/ >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks: [internal]
 
   frigate:

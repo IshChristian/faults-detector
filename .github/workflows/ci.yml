@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_DB: visionguard_test
+          POSTGRES_USER: visionguard
+          POSTGRES_PASSWORD: visionguard
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U visionguard -d visionguard_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      valkey:
+        image: valkey/valkey:8.0.1-alpine
+        ports: ["6380:6379"]
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://visionguard:visionguard@127.0.0.1:5433/visionguard_test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.7"
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  dashboard:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.18.0"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npx vitest run
+      - run: npx tsc --noEmit
+      - run: npx vite build
+
+  compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dummy .env from .env.example
+        run: sed -E 's/^([A-Z0-9_]+)=$/\1=dummy/' .env.example > .env
+      - run: docker compose config -q
+      - run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+
+  licenses:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.7"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.18.0"
+      - name: Backend production dependencies
+        working-directory: backend
+        run: |
+          uv sync --frozen --no-dev
+          .venv/bin/python ../scripts/check_python_licenses.py
+      - name: Dashboard production dependencies
+        working-directory: dashboard
+        run: |
+          npm ci --no-audit --no-fund
+          npx --yes license-checker@25.0.1 --production --excludePrivatePackages \
+            --onlyAllow "MIT;BSD;Apache-2.0;ISC;0BSD;BSD-2-Clause;BSD-3-Clause;Python-2.0;MPL-2.0;OFL-1.1"
+          if npx --yes license-checker@25.0.1 --production --json | grep -qi ultralytics; then
+            echo "Ultralytics packages are not allowed"; exit 1
+          fi

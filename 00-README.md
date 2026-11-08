@@ -16,7 +16,7 @@ This pack contains the documents needed to start building, deploying, selling, a
 1. `01-project-charter.md` — goals, scope, stakeholders, success metrics.
 2. `02-product-requirements.md` — features, user stories, priorities.
 3. `03-technical-architecture.md` — system design and data flow.
-4. `04-database-schema.sql` — PostgreSQL database design (link to `database/init/01_schema.sql`).
+4. `04-database-schema.sql` — PostgreSQL database design (link to `backend/migrations/sql/0001_baseline.sql`, Alembic revision 0001; later changes are Alembic revisions in `backend/migrations/versions/`).
 5. `05-api-specification.md` — backend API endpoints.
 6. `06-docker-compose.yml` — full local/server deployment stack (link to `docker-compose.yml`).
 7. `07-frigate-config.yml` — CCTV ingestion and detection configuration (link to `frigate/config.yml`).
@@ -30,7 +30,7 @@ This pack contains the documents needed to start building, deploying, selling, a
 15. `15-sales-proposal-template.md` — customer proposal and contract terms.
 16. `16-ui-ux-design-document.pdf` — visual design system, screens, components, tokens.
 
-Runtime files: `docker-compose.yml`, `.env.example`, `frigate/config.yml`, `mosquitto/config/`, `database/init/`.
+Runtime files: `docker-compose.yml`, `.env.example`, `frigate/config.yml`, `mosquitto/config/`, `backend/migrations/`.
 Files 04, 06 and 07 are symbolic links to the runtime files, so the docs and the deployed configuration can't drift apart.
 
 ## Technology decisions

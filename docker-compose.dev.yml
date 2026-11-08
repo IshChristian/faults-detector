@@ -1,0 +1,12 @@
+# Development override: publishes PostgreSQL and Valkey on localhost so the test suite
+# on the host can reach them. Never use this file in production.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres valkey
+#   docker compose exec postgres createdb -U "$POSTGRES_USER" visionguard_test
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5433:5432"
+  valkey:
+    ports:
+      - "127.0.0.1:6380:6379"

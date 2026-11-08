@@ -1,1 +1,1 @@
-database/init/01_schema.sql
+backend/migrations/sql/0001_baseline.sql

@@ -1,0 +1,12 @@
+# Leading "/" anchors a pattern to the repo root. Without it, "models/" would
+# also ignore source folders such as backend/app/models/.
+.env
+/mosquitto/config/passwd
+/mosquitto/config/acl
+/models/
+/datasets/
+/media/
+*.pt
+*.onnx
+__pycache__/
+.venv/

@@ -31,7 +31,7 @@ cp .env.example .env
 nano .env
 ```
 
-Fill in **every** empty value in `.env`. Generate secrets with `openssl rand -base64 32`. Generate the credentials encryption key with:
+Fill in **every** empty value in `.env`. Generate passwords and `SECRET_KEY` with `openssl rand -hex 32`. Use hex, not base64: base64 can produce `/`, `+` or `=`, which break the database URL built from `POSTGRES_PASSWORD`. Generate the credentials encryption key with:
 
 ```bash
 python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"

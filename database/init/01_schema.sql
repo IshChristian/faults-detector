@@ -303,8 +303,21 @@ CREATE TABLE audit_logs (
 );
 CREATE INDEX idx_audit_customer_time ON audit_logs(customer_id, created_at DESC);
 
+-- Append-only, with one exception: the ON DELETE SET NULL foreign keys above run as
+-- UPDATEs on this table. Without the exception, deleting any customer, user or API key
+-- that appears in the audit log would fail. So an UPDATE is allowed only when it
+-- nulls one or more of the reference columns and changes nothing else.
 CREATE OR REPLACE FUNCTION audit_logs_block_changes() RETURNS trigger AS $$
 BEGIN
+    IF  (NEW.id, NEW.action, NEW.entity_type, NEW.entity_id, NEW.details, NEW.ip_address, NEW.created_at)
+            IS NOT DISTINCT FROM
+        (OLD.id, OLD.action, OLD.entity_type, OLD.entity_id, OLD.details, OLD.ip_address, OLD.created_at)
+        AND (NEW.customer_id      IS NULL OR NEW.customer_id      = OLD.customer_id)
+        AND (NEW.actor_user_id    IS NULL OR NEW.actor_user_id    = OLD.actor_user_id)
+        AND (NEW.actor_api_key_id IS NULL OR NEW.actor_api_key_id = OLD.actor_api_key_id)
+    THEN
+        RETURN NEW;
+    END IF;
     RAISE EXCEPTION 'audit_logs is append-only';
 END;
 $$ LANGUAGE plpgsql;

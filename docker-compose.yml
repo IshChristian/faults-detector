@@ -92,7 +92,17 @@ services:
     image: ghcr.io/blakeblackshear/frigate:0.17.2
     <<: [*restart, *logging]
     shm_size: "256mb"          # ~64 MB per 720p detect stream; raise for more cameras
-    env_file: .env             # provides FRIGATE_MQTT_* and FRIGATE_RTSP_* used in frigate/config.yml
+    # Only the FRIGATE_* values that frigate/config.yml substitutes. Not env_file: .env,
+    # which would also hand Frigate the app secret, DB password and Telegram token.
+    # Adding a camera host variable to config.yml means adding it here as well.
+    environment:
+      FRIGATE_MQTT_USER: ${FRIGATE_MQTT_USER}
+      FRIGATE_MQTT_PASSWORD: ${FRIGATE_MQTT_PASSWORD}
+      FRIGATE_RTSP_USER: ${FRIGATE_RTSP_USER}
+      FRIGATE_RTSP_PASSWORD: ${FRIGATE_RTSP_PASSWORD}
+      FRIGATE_ENTRANCE_HOST: ${FRIGATE_ENTRANCE_HOST}
+      FRIGATE_DINING_HOST: ${FRIGATE_DINING_HOST}
+      FRIGATE_PITCH_HOST: ${FRIGATE_PITCH_HOST}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:8971:8971"   # authenticated Frigate UI/API (use this, not 5000)
       - "${BIND_ADDR:-127.0.0.1}:8554:8554"   # go2rtc RTSP restream

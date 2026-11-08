@@ -105,7 +105,7 @@ The schema in `database/init/01_schema.sql` becomes Alembic revision 0001. Postg
 
 **Interfaces:**
 - Produces: `app.db.get_session() -> AsyncIterator[AsyncSession]` (FastAPI dependency); `app.db.Base` (DeclarativeBase). ORM classes mapping existing tables: `Customer`, `User`, `RefreshToken`, `Site` (in `tenancy.py`), `Camera` (in `sources.py`, including new `mode`), `AuditLog` (in `audit.py`). Map only the columns these tables have in the SQL; do not map tables later plans own.
-- Produces (tests): fixtures `db_session` (AsyncSession inside an outer transaction rolled back after each test, `join_transaction_mode="create_savepoint"`), `client` (overrides `get_session` with `db_session`), `make_customer(**kw) -> Customer`, `make_user(customer, role, email=..., password="Passw0rd!long") -> User`. Tests read `TEST_DATABASE_URL` (default `postgresql+asyncpg://visionguard:visionguard@127.0.0.1:5433/visionguard_test`) and run `alembic upgrade head` once per session.
+- Produces (tests): fixtures `db_session` (AsyncSession inside an outer transaction rolled back after each test, `join_transaction_mode="create_savepoint"`), `client` (overrides `get_session` with `db_session`), `make_customer(**kw) -> Customer`, `make_user(customer, role, email=..., password="Passw0rd!long") -> User`. Tests read `TEST_DATABASE_URL`. When it is unset (local dev), conftest builds `postgresql+asyncpg://{user}:{password}@127.0.0.1:5433/visionguard_test` from `POSTGRES_USER`/`POSTGRES_PASSWORD` in the repo-root `.env` (read with `dotenv_values`; python-dotenv is a pinned dev dependency), with the password passed through `urllib.parse.quote(..., safe="")`. That way local tests use the same credentials as the dev Postgres container. CI sets `TEST_DATABASE_URL` explicitly. Tests run `alembic upgrade head` once per session.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -205,7 +205,7 @@ async def test_require_roles_blocks_viewer(...)            # temp route require_
 - Produces: `async def record_audit(session: AsyncSession, *, action: str, customer_id: UUID | None, actor: CurrentUser | None = None, entity_type: str | None = None, entity_id: UUID | None = None, details: dict | None = None, ip: str | None = None) -> None` (adds a row to the current transaction; it doesn't commit).
 - Produces: `def scoped(stmt: Select, model, user: CurrentUser) -> Select` (adds `model.customer_id == user.customer_id` unless super_admin); `async def get_scoped_or_404(session, model, id: UUID, user: CurrentUser, entity: str) -> model`; `def resolve_customer_id(user: CurrentUser, requested: UUID | None) -> UUID` (super_admin: `requested` is required, else `ApiError(422,"validation", detail="customer_id is required")`; everyone else: always `user.customer_id`, and `requested` is ignored).
 
-- [ ] **Step 1: Write failing tests**: `test_login_writes_audit_row` (action `auth.login`, actor id, ip); `test_failed_login_writes_audit_without_actor`; `test_audit_rows_cannot_be_updated` (raw UPDATE raises DB error containing "append-only"); `test_scoped_filters_other_customers`; `test_get_scoped_or_404_hides_other_customer` (raises ApiError 404); `test_resolve_customer_id_rules` (the three cases above).
+- [ ] **Step 1: Write failing tests**: `test_login_writes_audit_row` (action `auth.login`, actor id, ip); `test_failed_login_writes_audit_without_actor`; `test_audit_rows_cannot_be_updated` (raw UPDATE of `action` or `details` raises DB error containing "append-only"); `test_deleting_user_keeps_audit_row_with_null_actor` (hard-delete a user who has an audit row: the delete succeeds, and the row survives with `actor_user_id` NULL and other columns unchanged); `test_scoped_filters_other_customers`; `test_get_scoped_or_404_hides_other_customer` (raises ApiError 404); `test_resolve_customer_id_rules` (the three cases above).
 - [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** → PASS.
 - [ ] **Step 5: Commit** `feat: audit service and tenant scoping helpers`
 
@@ -372,13 +372,13 @@ test("problem+json errors are thrown as ApiProblem with type and detail")
 
 **Interfaces:**
 - Jobs:
-  - `backend`: ubuntu-24.04; services `postgres:16.4-alpine` (env DB `visionguard_test`, user/password `visionguard`, port 5433:5432) and `valkey/valkey:8.0.1-alpine`; `astral-sh/setup-uv`; `uv run pytest -q`.
+  - `backend`: ubuntu-24.04; services `postgres:16.4-alpine` (env DB `visionguard_test`, user/password `visionguard`, port 5433:5432) and `valkey/valkey:8.0.1-alpine`; env `TEST_DATABASE_URL=postgresql+asyncpg://visionguard:visionguard@127.0.0.1:5433/visionguard_test`; `astral-sh/setup-uv`; `uv run pytest -q`.
   - `dashboard`: node 20.18.0; `npm ci`; `npx vitest run`; `npx tsc --noEmit`; `npx vite build`.
   - `compose`: `docker compose config -q` with a dummy `.env` generated from `.env.example`.
   - `licenses`: fails if `pip-licenses` (backend) or `license-checker --onlyAllow "MIT;BSD;Apache-2.0;ISC;0BSD;BSD-2-Clause;BSD-3-Clause;Python-2.0;MPL-2.0"` (dashboard) finds anything else, or if any installed package name matches `ultralytics`.
 
 - [ ] **Step 1: Write** the workflow.
-- [ ] **Step 2: Verify locally** that each job's commands pass (`uv run pytest -q`, the dashboard commands, `docker compose config -q`, and both license checks). The repo has no GitHub remote yet, so CI runs once one is added.
+- [ ] **Step 2: Verify locally** that each job's commands pass (`uv run pytest -q`, the dashboard commands, `docker compose config -q`, and both license checks). The workflow lives at the repo root (`.github/workflows/ci.yml`) and runs on push to `origin` (github.com/IshChristian/faults-detector).
 - [ ] **Step 3: Commit** `ci: backend, dashboard, compose and license checks`
 
 ---

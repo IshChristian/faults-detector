@@ -11,18 +11,20 @@ import sys
 from importlib.metadata import distributions
 
 ALLOWED = {"MIT", "MIT-0", "BSD", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "Apache-2.0", "ISC",
-           "PSF-2.0", "Python-2.0", "MPL-2.0", "Unlicense"}
+           "PSF-2.0", "Python-2.0", "MPL-2.0", "Unlicense", "HPND", "MIT-CMU"}
 FORBIDDEN_NAMES = re.compile(r"ultralytics", re.I)
 
 CLASSIFIERS = {
     "MIT License": "MIT", "BSD License": "BSD", "Apache Software License": "Apache-2.0",
     "ISC License (ISCL)": "ISC", "Python Software Foundation License": "PSF-2.0",
     "Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0", "The Unlicense (Unlicense)": "Unlicense",
+    "Historical Permission Notice and Disclaimer (HPND)": "HPND",
 }
 # Free-text License: fields seen in the wild, mapped to SPDX ids.
 TEXT = {"mit": "MIT", "mit license": "MIT", "bsd": "BSD", "bsd license": "BSD", "bsd-3-clause": "BSD-3-Clause",
         "apache 2.0": "Apache-2.0", "apache-2.0": "Apache-2.0", "apache license 2.0": "Apache-2.0",
-        "apache software license": "Apache-2.0", "isc": "ISC", "psf": "PSF-2.0"}
+        "apache software license": "Apache-2.0", "isc": "ISC", "psf": "PSF-2.0", "hpnd": "HPND", "mit-cmu": "MIT-CMU",
+        "3-clause bsd license": "BSD-3-Clause"}
 
 
 def spdx_ok(expression: str) -> bool:
@@ -44,7 +46,10 @@ def license_of(dist) -> tuple[str, bool]:
         return "; ".join(names) or "unrecognised classifier", bool(names) and any(n in ALLOWED for n in names)
     text = (meta.get("License") or "").strip()
     spdx = TEXT.get(text.lower())
-    return text or "UNKNOWN", spdx in ALLOWED if spdx else False
+    if spdx:
+        return text, spdx in ALLOWED
+    # Some packages put an SPDX expression (e.g. "MPL-2.0 AND MIT") in the free-text field.
+    return text or "UNKNOWN", bool(text) and spdx_ok(text)
 
 
 def main() -> int:

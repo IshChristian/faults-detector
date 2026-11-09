@@ -34,6 +34,14 @@ class LocalStorage:
             raise
         return size
 
+    def import_file(self, key: str, src: Path) -> int:
+        """Move `src` into the store (atomic when on the same filesystem) and return its size."""
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        size = Path(src).stat().st_size
+        os.replace(src, path)
+        return size
+
     def open(self, key: str) -> BinaryIO:
         return self._path(key).open("rb")
 

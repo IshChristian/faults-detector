@@ -17,3 +17,8 @@ QueueName = Literal["default", "sessions"]
 def get_queue(name: QueueName, connection: redis.Redis | None = None) -> Queue:
     conn = connection or redis.Redis.from_url(get_settings().redis_url)
     return Queue(name, connection=conn)
+
+
+def get_sessions_queue() -> Queue:
+    """FastAPI dependency for the long-running sessions queue; tests override it."""
+    return get_queue("sessions")

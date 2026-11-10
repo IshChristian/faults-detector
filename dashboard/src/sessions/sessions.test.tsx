@@ -292,13 +292,77 @@ test("a failed video shows the server message and a Remove button", async () => 
   signedInAs(coach, "/sessions/s-1");
   const user = userEvent.setup();
   expect(await screen.findByText("Unsupported codec")).toBeInTheDocument();
-  expect(screen.getAllByRole("button", { name: /^Remove/ })).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: /^Remove/ })).toHaveLength(2); // any video can go while not processing
 
   await user.click(screen.getByRole("button", { name: "Remove bad.mp4" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(/try again/i);
   await user.click(screen.getByRole("button", { name: "Remove bad.mp4" }));
   await waitFor(() => expect(screen.queryByText("Unsupported codec")).not.toBeInTheDocument());
   expect(screen.getByText("ok.mp4")).toBeInTheDocument();
+});
+
+test("the process button mirrors the backend rule: retry after failure, reprocess when ready", async () => {
+  const state = { session: { ...sessionRow({ status: "failed", error: "boom" }), videos: [video("a", 0)] } };
+  detailHandlers(state);
+  let posts = 0;
+  server.use(
+    http.post(`${API}/sessions/s-1/process`, () => {
+      posts += 1;
+      return HttpResponse.json({ ...state.session, status: "queued" }, { status: 202 });
+    }),
+  );
+  const view = signedInAs(coach, "/sessions/s-1");
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Retry processing" }));
+  await waitFor(() => expect(posts).toBe(1));
+  view.unmount();
+
+  // A video added to a ready session: one already processed, one just uploaded.
+  state.session = {
+    ...sessionRow({ status: "ready" }),
+    videos: [video("a", 0, { status: "processed" }), video("b", 1)],
+  };
+  const again = signedInAs(coach, "/sessions/s-1");
+  expect(await screen.findByRole("button", { name: "Reprocess" })).toBeEnabled();
+  again.unmount();
+
+  // Results invalidated by a video change: processed videos still count as ready to process.
+  state.session = { ...sessionRow(), videos: [video("a", 0, { status: "processed" })] };
+  const third = signedInAs(coach, "/sessions/s-1");
+  expect(await screen.findByRole("button", { name: "Start processing" })).toBeEnabled();
+  third.unmount();
+
+  state.session = { ...sessionRow({ status: "ready" }), videos: [video("a", 0), video("b", 1, { status: "uploading" })] };
+  signedInAs(coach, "/sessions/s-1");
+  expect(await screen.findByRole("button", { name: "Reprocess" })).toBeDisabled();
+});
+
+test("an abandoned upload says how to resume and can be removed, but not while processing", async () => {
+  const state = {
+    session: { ...sessionRow(), videos: [video("lost", 0, { status: "uploading" }), video("ok", 1)] },
+  };
+  detailHandlers(state);
+  let deleted = false;
+  server.use(
+    http.delete(`${API}/uploads/lost`, () => {
+      deleted = true;
+      state.session = { ...sessionRow(), videos: [video("ok", 0)] };
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  const view = signedInAs(coach, "/sessions/s-1");
+  const user = userEvent.setup();
+  expect(await screen.findByText("Re-select this file to resume")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start processing" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "Remove lost.mp4" }));
+  await waitFor(() => expect(deleted).toBe(true));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start processing" })).toBeEnabled());
+  view.unmount();
+
+  state.session = { ...sessionRow({ status: "processing", progress: 10 }), videos: [video("ok", 0)] };
+  signedInAs(coach, "/sessions/s-1");
+  expect(await screen.findByText("ok.mp4")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
 });
 
 test("polls while processing and stops when ready", async () => {

@@ -66,6 +66,8 @@ export function UploadPanel({ session, canWrite, onChange }: Props) {
     }
   }
 
+  // Matches the backend DELETE rule: nothing can be removed while the session is queued or processing.
+  const canRemove = canWrite && session.status !== "queued" && session.status !== "processing";
   const known = new Set(session.videos.map((v) => v.original_filename));
   const pending = Object.keys(local).filter((name) => !known.has(name));
 
@@ -98,6 +100,7 @@ export function UploadPanel({ session, canWrite, onChange }: Props) {
               <span className="muted">{v.status}</span>
               <Bar name={name} value={pct} />
               {v.status === "failed" && <span className="form-error">{v.error ?? l?.error ?? "Upload failed"}</span>}
+              {v.status === "uploading" && !l && <span className="muted">Re-select this file to resume</span>}
               {canWrite && (
                 <span className="video-actions">
                   <button type="button" className="btn-icon" aria-label={`Move ${name} up`} disabled={i === 0} onClick={() => move(i, -1)}>
@@ -106,7 +109,7 @@ export function UploadPanel({ session, canWrite, onChange }: Props) {
                   <button type="button" className="btn-icon" aria-label={`Move ${name} down`} disabled={i === session.videos.length - 1} onClick={() => move(i, 1)}>
                     ↓
                   </button>
-                  {v.status === "failed" && (
+                  {canRemove && (
                     <button type="button" className="btn btn-secondary" aria-label={`Remove ${name}`} onClick={() => remove(v)}>
                       Remove
                     </button>

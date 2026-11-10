@@ -158,12 +158,20 @@ async def create_upload(request: Request, user: CurrentUser = Depends(writer),
 
 
 @router.head("/{video_id}")
-async def upload_status(video_id: uuid.UUID, user: CurrentUser = Depends(writer),
-                        db: AsyncSession = Depends(get_session)) -> Response:
+async def upload_status(video_id: uuid.UUID, request: Request, user: CurrentUser = Depends(writer),
+                        db: AsyncSession = Depends(get_session), storage: Storage = Depends(get_storage)) -> Response:
     video = await _get_video(db, video_id, user)
     if video.status == "failed":
         raise ApiError(410, "gone", "Gone", "This upload failed; remove it and upload again")
     offset = video.size_bytes if video.status != "uploading" else staging.staged_size(video.id)
+    if video.status == "uploading" and offset == video.size_bytes:
+        # Every byte arrived but finalize never finished; a tus client now treats the upload as done.
+        await _lock_upload(db, video.id)
+        await db.refresh(video)
+        if video.status == "uploading":
+            failure = await _complete(db, video_id, video.session_id, user, request, storage)
+            if failure is not None:
+                return failure
     return Response(status_code=200, headers={
         "Upload-Offset": str(offset), "Upload-Length": str(video.size_bytes), "Cache-Control": "no-store"})
 
@@ -201,8 +209,17 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
     if position < video.size_bytes:
         return Response(status_code=204, headers=headers)
 
-    # Completion: session lock first (same order as POST/DELETE), so completions in a session run one at a time.
-    await _lock_session(db, video.session_id)
+    failure = await _complete(db, video_id, video.session_id, user, request, storage)
+    return failure or Response(status_code=204, headers=headers)
+
+
+async def _complete(db: AsyncSession, video_id: uuid.UUID, session_id: uuid.UUID, user: CurrentUser,
+                    request: Request, storage: Storage) -> Response | None:
+    """Probe the fully staged file and move it into storage. The caller holds the upload's advisory lock.
+    Returns a problem response when the file isn't a video (returned, not raised, so the failure commits)."""
+    path = staging.staging_path(video_id)
+    # Session lock first (same order as POST/DELETE), so completions in a session run one at a time.
+    await _lock_session(db, session_id)
     try:
         video = await _get_video(db, video_id, user, fresh=True)  # re-check: the row must still exist
     except ApiError:
@@ -213,7 +230,7 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
     except VideoError:
         video.status, video.error = "failed", NOT_A_VIDEO
         staging.remove_staging(video.id)
-        return problem_response(422, "not-a-video", "Not a video", NOT_A_VIDEO)  # returned, so the failure commits
+        return problem_response(422, "not-a-video", "Not a video", NOT_A_VIDEO)
     size = await anyio.to_thread.run_sync(storage.import_file, video.original_key, path)
     video.size_bytes = size
     video.duration_ms, video.fps, video.width, video.height = info.duration_ms, info.fps, info.width, info.height
@@ -224,7 +241,7 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
     await record_audit(db, action="session.upload", customer_id=video.customer_id, actor=user,
                        entity_type="session", entity_id=video.session_id, ip=client_ip(request),
                        details={"video_id": str(video.id), "filename": video.original_filename, "size_bytes": size})
-    return Response(status_code=204, headers=headers)
+    return None
 
 
 @router.delete("/{video_id}", status_code=204)

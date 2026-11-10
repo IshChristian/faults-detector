@@ -246,3 +246,40 @@ async def test_delete_is_409_while_another_transaction_holds_the_upload_lock(cli
         await other.rollback()
     assert (await client.delete(loc, headers={**headers, **TUS})).status_code == 204
     assert await _videos(db_session, sid) == []
+
+
+async def _fully_staged(client, db_session, tenant, tmp_path, media_storage):
+    """An upload whose bytes all reached the staging file but whose finalize step never ran (e.g. it crashed)."""
+    sid, headers = await _session(client, db_session, tenant)
+    data = make_clip(tmp_path / "a.mp4", seconds=1).read_bytes()
+    loc = (await tus_create(client, headers, sid, len(data))).headers["Location"]
+    (media_storage.root / "_uploads" / f"{loc.rsplit('/', 1)[1]}.part").write_bytes(data)
+    return sid, headers, loc, data
+
+
+async def test_head_on_a_fully_staged_upload_finalizes_it(client, db_session, tenant, tmp_path, media_storage):
+    # tus clients treat offset == length as done and never PATCH again, so HEAD must finish the job.
+    sid, headers, loc, data = await _fully_staged(client, db_session, tenant, tmp_path, media_storage)
+    head = await client.head(loc, headers={**headers, **TUS})
+    assert head.status_code == 200 and head.headers["Upload-Offset"] == str(len(data))
+    (video,) = await _videos(db_session, sid)
+    assert video.status == "uploaded" and video.duration_ms and media_storage.exists(video.original_key)
+    assert not (media_storage.root / "_uploads" / f"{video.id}.part").exists()
+
+
+async def test_empty_patch_at_full_length_finalizes_the_upload(client, db_session, tenant, tmp_path, media_storage):
+    sid, headers, loc, data = await _fully_staged(client, db_session, tenant, tmp_path, media_storage)
+    r = await tus_patch(client, headers, loc, len(data), b"")
+    assert r.status_code == 204 and r.headers["Upload-Offset"] == str(len(data))
+    (video,) = await _videos(db_session, sid)
+    assert video.status == "uploaded"
+
+
+async def test_head_on_a_fully_staged_non_video_marks_it_failed(client, db_session, tenant, media_storage):
+    sid, headers = await _session(client, db_session, tenant)
+    loc = (await tus_create(client, headers, sid, 10)).headers["Location"]
+    (media_storage.root / "_uploads" / f"{loc.rsplit('/', 1)[1]}.part").write_bytes(b"x" * 10)
+    head = await client.head(loc, headers={**headers, **TUS})
+    assert head.status_code == 422
+    (video,) = await _videos(db_session, sid)
+    assert video.status == "failed"

@@ -7,6 +7,9 @@ import { sessionTitle } from "./SessionList";
 import { UploadPanel } from "./UploadPanel";
 
 const POLL_MS = 5000;
+// Mirrors the backend's ensure_processable.
+const PROCESSABLE = ["uploading", "ready", "failed"];
+const PROCESS_LABEL: Record<string, string> = { failed: "Retry processing", ready: "Reprocess" };
 
 export function SessionDetail() {
   const { id = "" } = useParams();
@@ -72,8 +75,9 @@ export function SessionDetail() {
   if (error && !session) return <p role="alert">{error}</p>;
   if (!session) return <p className="muted">Loading session…</p>;
 
-  const allUploaded = session.videos.length > 0 && session.videos.every((v) => v.status === "uploaded");
-  const canStart = canWrite && session.status === "uploading" && allUploaded && !starting;
+  const allUploaded =
+    session.videos.length > 0 && session.videos.every((v) => v.status === "uploaded" || v.status === "processed");
+  const canStart = canWrite && PROCESSABLE.includes(session.status) && allUploaded && !starting;
 
   return (
     <>
@@ -92,7 +96,7 @@ export function SessionDetail() {
         )}
         {canWrite && (
           <button type="button" className="btn btn-primary" disabled={!canStart} onClick={start}>
-            Start processing
+            {PROCESS_LABEL[session.status] ?? "Start processing"}
           </button>
         )}
       </div>

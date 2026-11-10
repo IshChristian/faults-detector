@@ -212,3 +212,5 @@ async def test_calibration_while_queued_or_processing_enqueues_metrics(client, d
         await db_session.flush()
         assert (await _calibrate(client, headers, sid)).status_code == 201
     assert [j.func_name for j in sessions_queue.jobs] == ["app.worker.session_jobs.compute_session_metrics"] * 2
+    # RQ's default 180 s timeout is far too short for a long session's metrics.
+    assert all(j.timeout == 2 * 3600 and j.result_ttl == 86400 for j in sessions_queue.jobs)

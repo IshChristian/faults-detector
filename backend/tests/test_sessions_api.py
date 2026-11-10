@@ -151,6 +151,8 @@ async def test_sprint_threshold_change_enqueues_metrics_unless_uploading_or_unca
         await db_session.flush()
         assert (await client.patch(url, json={"sprint_threshold_kmh": 22 + i}, headers=headers)).status_code == 200
     assert [j.func_name for j in sessions_queue.jobs] == ["app.worker.session_jobs.compute_session_metrics"] * 3
+    # RQ's default 180 s timeout is far too short for a long session's metrics.
+    assert all(j.timeout == 2 * 3600 and j.result_ttl == 86400 for j in sessions_queue.jobs)
 
 
 async def _queued_session(client, db_session, tenant, tmp_path):

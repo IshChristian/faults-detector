@@ -46,7 +46,8 @@ async def reorder_by_creation_time(db: AsyncSession, session_id: uuid.UUID) -> N
 
 def enqueue_metrics(queue: Queue, s: Session) -> None:
     """Queue a metrics recompute; the caller commits first so the worker sees the change."""
-    queue.enqueue("app.worker.session_jobs.compute_session_metrics", str(s.id))
+    queue.enqueue("app.worker.session_jobs.compute_session_metrics", str(s.id), job_timeout=2 * 3600,
+                  result_ttl=86400)
 
 
 async def reconcile_stale_job(db: AsyncSession, s: Session, queue: Queue) -> None:

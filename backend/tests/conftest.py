@@ -46,8 +46,12 @@ import fakeredis  # noqa: E402
 from app.auth.security import create_access_token, hash_password  # noqa: E402
 from app.cache import get_redis  # noqa: E402
 from app.db import get_session  # noqa: E402  (settings env must be set first)
+from app.config import get_settings  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Customer, User  # noqa: E402
+from app.storage.base import get_storage  # noqa: E402
+from app.storage.local import LocalStorage  # noqa: E402
+from app.worker.queues import get_queue, get_sessions_queue  # noqa: E402
 
 
 def pytest_collection_modifyitems(items):
@@ -90,8 +94,24 @@ async def db_session(engine):
 
 
 @pytest.fixture
-async def client(db_session):
+def media_storage(tmp_path, monkeypatch):
+    """Local storage rooted under tmp_path; settings.media_root points at the same directory."""
+    root = tmp_path / "media"
+    monkeypatch.setattr(get_settings(), "media_root", root)
+    return LocalStorage(root)
+
+
+@pytest.fixture
+def sessions_queue():
+    """The sessions queue on a FakeRedis connection; inspect with `.jobs`."""
+    return get_queue("sessions", connection=fakeredis.FakeRedis())
+
+
+@pytest.fixture
+async def client(db_session, media_storage, sessions_queue):
     app = create_app()
+    app.dependency_overrides[get_storage] = lambda: media_storage
+    app.dependency_overrides[get_sessions_queue] = lambda: sessions_queue
 
     async def _session_override():
         yield db_session

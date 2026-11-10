@@ -15,6 +15,12 @@ dependencies = [
     "pyjwt==2.10.1",
     "redis==5.2.1",
     "rq==2.1.0",
+    "numpy==2.2.6",
+    "opencv-python-headless==4.11.0.86",
+    "onnxruntime==1.20.1",
+    "supervision==0.26.1",
+    "scipy==1.15.1",
+    "pyarrow==18.1.0",
 ]
 
 [dependency-groups]
@@ -28,12 +34,17 @@ dev = [
 
 [tool.uv]
 package = false
+# supervision pulls in the GUI opencv-python; only the headless build is wanted.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "model: needs the real ONNX detection model (models/rfdetr-nano.onnx); skipped when absent",
+]
 filterwarnings = [
     # fakeredis lacks CLIENT SETNAME; real Valkey supports it.
     "ignore:CLIENT SETNAME command not supported:Warning",

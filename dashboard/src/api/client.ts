@@ -33,6 +33,11 @@ export function setAccessToken(token: string | null) {
   accessToken = token;
 }
 
+/** The current in-memory access token (read at request time so long-lived callers see refreshes). */
+export function getAccessToken(): string | null {
+  return accessToken;
+}
+
 export function configureClient(opts: { onUnauthenticated: () => void }) {
   onUnauthenticated = opts.onUnauthenticated;
 }

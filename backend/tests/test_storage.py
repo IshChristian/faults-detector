@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 import time
 
 import pytest
@@ -104,3 +105,56 @@ async def test_range_request_returns_206(media_client, storage):
     assert r.status_code == 206
     assert r.content == bytes(range(10, 20))
     assert r.headers["content-range"] == "bytes 10-19/100"
+
+
+def test_import_file_falls_back_to_copy_across_filesystems(storage, tmp_path, monkeypatch):
+    # In Docker /tmp and the media volume are separate filesystems: rename(2) fails with EXDEV.
+    import errno
+    import os
+
+    import app.storage.local as local
+
+    src = tmp_path / "elsewhere" / "proxy.mp4"
+    src.parent.mkdir()
+    src.write_bytes(b"proxy bytes")
+    real_replace, calls = os.replace, []
+
+    def replace(a, b):
+        calls.append((a, b))
+        if len(calls) == 1:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(a, b)
+
+    monkeypatch.setattr(local.os, "replace", replace)
+    assert storage.import_file("sessions/c/s/proxy/v.mp4", src) == 11
+    assert storage.open("sessions/c/s/proxy/v.mp4").read() == b"proxy bytes"
+    assert not src.exists()
+    dest_dir = storage.local_path("sessions/c/s/proxy/v.mp4").parent
+    assert [p.name for p in dest_dir.iterdir()] == ["v.mp4"]  # no temp file left behind
+    assert len(calls) == 2 and Path(calls[1][0]).parent == dest_dir  # the final step is an atomic same-dir rename
+
+
+def test_import_file_reraises_other_os_errors(storage, tmp_path, monkeypatch):
+    import errno
+
+    import app.storage.local as local
+
+    src = tmp_path / "x.bin"
+    src.write_bytes(b"x")
+
+    def replace(a, b):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(local.os, "replace", replace)
+    with pytest.raises(PermissionError):
+        storage.import_file("a/x.bin", src)
+
+
+def test_scratch_dir_is_under_media_root(storage, monkeypatch):
+    from app.config import get_settings
+    from app.storage.local import scratch_dir
+
+    monkeypatch.setattr(get_settings(), "media_root", storage.root)
+    with scratch_dir() as tmp:
+        assert Path(tmp).is_relative_to(storage.root / "_tmp") and Path(tmp).is_dir()
+    assert not Path(tmp).exists()

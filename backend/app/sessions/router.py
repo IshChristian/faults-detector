@@ -1,4 +1,6 @@
+import json
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from rq import Queue
@@ -11,9 +13,11 @@ from app.common.errors import ApiError
 from app.common.pagination import Page, limit_param, paginate
 from app.common.request import client_ip
 from app.db import get_session
-from app.models import Camera, Session, Site
+from app.models import Camera, Session, SessionTrack, Site
 from app.sessions import service
 from app.sessions.schemas import SessionCreate, SessionDetail, SessionOut, SessionStatus, SessionUpdate, VideoOrder
+from app.storage.base import Storage, get_storage
+from app.storage.signing import sign_media_url
 from app.tenancy.scoping import get_scoped_or_404, scoped
 from app.worker.queues import get_sessions_queue
 
@@ -107,3 +111,32 @@ async def process_session(session_id: uuid.UUID, request: Request, user: Current
     await db.commit()  # the worker must see status=queued before it picks the job up
     queue.enqueue("app.worker.session_jobs.process_session", str(s.id), job_timeout=12 * 3600, result_ttl=86400)
     return detail
+
+
+@router.get("/{session_id}/summary")
+async def get_summary(session_id: uuid.UUID, user: CurrentUser = Depends(get_current_user),
+                      db: AsyncSession = Depends(get_session), storage: Storage = Depends(get_storage)):
+    s = await get_scoped_or_404(db, Session, session_id, user, "session")
+    if s.status != "ready" or not s.summary_key:
+        raise ApiError(409, "not-ready", "Session not ready", detail="The session has not finished processing")
+    with storage.open(s.summary_key) as f:
+        summary = json.load(f)
+    proxies, offset = [], 0
+    for v in await service.list_videos(db, s.id):
+        if v.proxy_key:
+            proxies.append({"video_id": str(v.id), "url": sign_media_url(v.proxy_key, ttl_seconds=3600),
+                            "t_offset_ms": offset})
+        offset += v.duration_ms or 0
+    return {**summary, "proxies": proxies}
+
+
+@router.get("/{session_id}/tracks")
+async def list_tracks(session_id: uuid.UUID, cls: Literal["person", "ball"] | None = None,
+                      user: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_session)):
+    s = await get_scoped_or_404(db, Session, session_id, user, "session")
+    stmt = select(SessionTrack).where(SessionTrack.session_id == s.id).order_by(SessionTrack.track_id)
+    if cls:
+        stmt = stmt.where(SessionTrack.cls == cls)
+    return [{"track_id": t.track_id, "cls": t.cls, "team": t.team, "team_corrected": t.team_corrected,
+             "on_pitch": t.on_pitch, "frames_count": t.frames_count, "first_ms": t.first_ms, "last_ms": t.last_ms,
+             "metrics": t.metrics} for t in (await db.execute(stmt)).scalars()]

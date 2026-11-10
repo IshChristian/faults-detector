@@ -128,6 +128,8 @@ def test_iter_frames_early_close_does_not_raise_on_ffmpeg_failure(tmp_path, monk
 
 
 def test_iter_frames_on_truncated_mp4_yields_fewer_frames_without_error(tmp_path):
+    """iter_frames cannot detect truncation; the check lives in the processing job
+    (app.worker.session_jobs compares analysed frames with duration * sample_fps)."""
     # Documents ffmpeg's behaviour: a truncated mp4 (moov at the front, so it still probes) makes ffmpeg
     # log "partial file" but exit 0, so iter_frames cannot tell it from a normal short video.
     full = make_clip(tmp_path / "full.mp4", seconds=3, size="320x180")

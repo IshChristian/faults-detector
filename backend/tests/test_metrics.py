@@ -159,3 +159,55 @@ def test_summary_marks_distances_approximate():
     assert s["intensity"]["approximate"] is True
     assert s["intensity"]["timeline"][0]["mean_speed_kmh"] == 5.0
     assert s["duration_ms"] == 60000 and s["tracks_total"] == 12
+
+
+def _reference_top_speed(t_ms, xy_m, window_ms=1000):
+    """Straightforward O(K^2) rolling 1 s mean of kept step speeds (the pre-optimisation algorithm)."""
+    from app.analysis.metrics import _steps
+
+    top = 0.0
+    for seg_t, _start, end, _dist, _dt, kmh, kept in _steps(t_ms, xy_m):
+        if not kept.any():
+            continue
+        k_end, k_kmh = end[kept], kmh[kept]
+        if seg_t[-1] - seg_t[0] < window_ms:
+            top = max(top, float(k_kmh.mean()))
+            continue
+        for te in k_end:
+            if te - seg_t[0] < window_ms:
+                continue
+            in_win = (k_end <= te) & (k_end > te - window_ms)
+            top = max(top, float(k_kmh[in_win].mean()))
+    return top
+
+
+def test_top_speed_matches_reference_on_random_track():
+    rng = np.random.default_rng(7)
+    n = 600
+    t = np.cumsum(rng.integers(60, 140, n)).astype(np.int64)
+    t[300:] += 2500  # a gap that splits the track into two segments
+    xy = np.cumsum(rng.normal(0, 0.45, (n, 2)), axis=0) + [50.0, 30.0]
+    xy[100:110] += 40.0  # teleport spikes, dropped by the speed cap
+    got = track_metrics(t, xy, 19.0, PITCH)["top_speed_kmh"]
+    assert got == pytest.approx(_reference_top_speed(t, xy), rel=1e-9)
+    assert got > 0
+
+
+def test_top_speed_is_fast_on_a_long_track():
+    import time
+
+    n = 54_000  # 90 minutes at 10 fps
+    t = np.arange(n, dtype=np.int64) * 100
+    xy = np.column_stack([np.cumsum(np.full(n, 0.3)) % 100, np.full(n, 30.0)])
+    start = time.perf_counter()
+    track_metrics(t, xy, 19.0, PITCH)
+    assert time.perf_counter() - start < 10
+
+
+def test_bands_do_not_overlap_when_sprint_threshold_is_below_14():
+    t, xy = _line([1.5] * 50 + [2.5] * 50 + [3.5] * 50)  # 5.4, 9 and 12.6 km/h
+    m = track_metrics(t, xy, 10.0, PITCH)
+    bands = m["band_seconds"]
+    assert bands["run"] == 0.0  # [10, 10) is empty
+    assert bands["walk"] > 4.0 and bands["jog"] > 4.0 and bands["sprint"] > 4.0  # smoothing blurs the joins
+    assert sum(bands.values()) == pytest.approx(15.0)  # moving time, nothing double-counted

@@ -79,6 +79,21 @@ def _heatmap(xy_m: np.ndarray, pitch: tuple[float, float]) -> np.ndarray:
     return hm / len(pts)
 
 
+def _top_rolling_mean(k_end: np.ndarray, k_kmh: np.ndarray, seg_start: int) -> float:
+    """Highest mean of the kept step speeds ending in (te - 1 s, te], over step ends te >= 1 s into the segment.
+
+    O(K log K): window bounds by binary search on the (sorted) end times, window sums by a cumulative sum.
+    """
+    window_ms = TOP_SPEED_WINDOW_S * 1000
+    te = k_end[k_end - seg_start >= window_ms]
+    if len(te) == 0:
+        return 0.0
+    cum = np.concatenate([[0.0], np.cumsum(k_kmh)])
+    lo = np.searchsorted(k_end, te - window_ms, side="right")
+    hi = np.searchsorted(k_end, te, side="right")
+    return float(((cum[hi] - cum[lo]) / (hi - lo)).max())
+
+
 def track_metrics(
     t_ms: np.ndarray, xy_m: np.ndarray, sprint_kmh: float, pitch: tuple[float, float]
 ) -> dict:
@@ -95,10 +110,13 @@ def track_metrics(
     sprints = 0
     for seg_t, _start, end, dist, dt, kmh, kept in _steps(t_ms, xy_m):
         distance += float(dist[kept].sum())
+        # Every band's upper bound is capped at the sprint threshold, so a low
+        # threshold (the schema allows 5 upward) never double-counts seconds.
+        walk_hi, jog_hi = min(WALK_MAX_KMH, sprint_kmh), min(JOG_MAX_KMH, sprint_kmh)
         for lo, hi, name in (
-            (0.0, WALK_MAX_KMH, "walk"),
-            (WALK_MAX_KMH, JOG_MAX_KMH, "jog"),
-            (JOG_MAX_KMH, sprint_kmh, "run"),
+            (0.0, walk_hi, "walk"),
+            (walk_hi, jog_hi, "jog"),
+            (jog_hi, sprint_kmh, "run"),
             (sprint_kmh, np.inf, "sprint"),
         ):
             bands[name] += float(dt[kept & (kmh >= lo) & (kmh < hi)].sum())
@@ -107,11 +125,7 @@ def track_metrics(
             if seg_t[-1] - seg_t[0] < TOP_SPEED_WINDOW_S * 1000:
                 top = max(top, float(k_kmh.mean()))
             else:
-                for te in k_end:
-                    if te - seg_t[0] < TOP_SPEED_WINDOW_S * 1000:
-                        continue
-                    in_win = (k_end <= te) & (k_end > te - TOP_SPEED_WINDOW_S * 1000)
-                    top = max(top, float(k_kmh[in_win].mean()))
+                top = max(top, _top_rolling_mean(k_end, k_kmh, seg_t[0]))
         run = 0.0
         for fast, ok, step_dt in zip(kmh >= sprint_kmh, kept, dt):
             if ok and fast:

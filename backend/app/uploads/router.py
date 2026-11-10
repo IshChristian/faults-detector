@@ -94,8 +94,20 @@ async def _lock_session(db: AsyncSession, session_id: uuid.UUID) -> None:
     await db.execute(select(Session.id).where(Session.id == session_id).with_for_update())
 
 
-async def _get_video(db: AsyncSession, video_id: uuid.UUID, user: CurrentUser, *, lock: bool = False) -> SessionVideo:
+async def _lock_upload(db: AsyncSession, video_id: uuid.UUID) -> None:
+    """Per-upload advisory lock (transaction scoped), shared by PATCH and DELETE. Lock order everywhere:
+    advisory(video), then session row, then video row. Unlike a row lock it never blocks other videos'
+    completions; if it is held the caller gets 409 and the client retries."""
+    key = func.hashtextextended(str(video_id), 0)
+    if not (await db.execute(select(func.pg_try_advisory_xact_lock(key)))).scalar_one():
+        raise ApiError(409, "conflict", "Conflict", "Another request is already working on this upload")
+
+
+async def _get_video(db: AsyncSession, video_id: uuid.UUID, user: CurrentUser, *, lock: bool = False,
+                     fresh: bool = False) -> SessionVideo:
     stmt = scoped(select(SessionVideo).where(SessionVideo.id == video_id), SessionVideo, user)
+    if fresh:
+        stmt = stmt.execution_options(populate_existing=True)
     if lock:
         stmt = stmt.with_for_update()
     video = (await db.execute(stmt)).scalar_one_or_none()
@@ -162,11 +174,7 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
                        "Content-Type must be application/offset+octet-stream")
     offset = _int_header(request, "Upload-Offset")
     video = await _get_video(db, video_id, user)
-    # Serialise chunks of this one upload with a transaction-scoped advisory lock. Unlike a row lock it never
-    # blocks other videos' completions (which renumber sibling rows), so two uploads can run side by side.
-    got = (await db.execute(select(func.pg_try_advisory_xact_lock(func.hashtext(str(video.id)))))).scalar_one()
-    if not got:
-        raise ApiError(409, "conflict", "Conflict", "Another request is already writing to this upload")
+    await _lock_upload(db, video.id)
     await db.refresh(video)
     if video.status != "uploading":
         raise ApiError(409, "conflict", "Conflict", f"This upload is {video.status}")
@@ -194,6 +202,11 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
     # Completion: session lock first (same order as POST/DELETE), so completions in a session run one at a time.
     await _lock_session(db, video.session_id)
     try:
+        video = await _get_video(db, video_id, user, fresh=True)  # re-check: the row must still exist
+    except ApiError:
+        staging.remove_staging(video_id)
+        raise
+    try:
         info = await anyio.to_thread.run_sync(probe, path)
     except VideoError:
         video.status, video.error = "failed", NOT_A_VIDEO
@@ -216,8 +229,9 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
 async def delete_upload(video_id: uuid.UUID, request: Request, user: CurrentUser = Depends(writer),
                         db: AsyncSession = Depends(get_session), storage: Storage = Depends(get_storage)) -> Response:
     video = await _get_video(db, video_id, user)
+    await _lock_upload(db, video.id)
     await _lock_session(db, video.session_id)
-    video = await _get_video(db, video_id, user, lock=True)
+    video = await _get_video(db, video_id, user, lock=True, fresh=True)
     s = await db.get(Session, video.session_id)
     if video.status not in ("uploading", "failed") and s.status in ("queued", "processing"):
         raise ApiError(409, "conflict", "Conflict", "This video is being processed; wait for it to finish")

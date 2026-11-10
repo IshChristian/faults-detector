@@ -1,7 +1,7 @@
 import base64
 import uuid
 
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select, text
 
 from app.models import AuditLog, Camera, Session, SessionVideo, Site
 from tests.media import make_clip
@@ -230,3 +230,19 @@ async def test_two_uploads_in_progress_one_completes_while_other_is_mid_upload(
     videos = await _videos(db_session, sid)
     assert [(v.original_filename, v.status, v.position) for v in videos] == [
         ("b.mp4", "uploaded", 0), ("a.mp4", "uploaded", 1)]
+
+
+async def test_delete_is_409_while_another_transaction_holds_the_upload_lock(client, db_session, tenant, engine):
+    sid, headers = await _session(client, db_session, tenant)
+    loc = (await tus_create(client, headers, sid, 100)).headers["Location"]
+    video_id = loc.rsplit("/", 1)[1]
+    key = text("hashtextextended(:id, 0)")
+    async with engine.connect() as other:  # a second connection plays the in-flight PATCH
+        await other.execute(select(func.pg_advisory_lock(key.bindparams(id=video_id))))
+        r = await client.delete(loc, headers={**headers, **TUS})
+        assert r.status_code == 409 and r.json()["type"].endswith("/conflict")
+        assert len(await _videos(db_session, sid)) == 1
+        await other.execute(select(func.pg_advisory_unlock(key.bindparams(id=video_id))))
+        await other.rollback()
+    assert (await client.delete(loc, headers={**headers, **TUS})).status_code == 204
+    assert await _videos(db_session, sid) == []

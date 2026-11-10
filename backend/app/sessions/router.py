@@ -109,6 +109,9 @@ async def set_video_order(session_id: uuid.UUID, body: VideoOrder, request: Requ
 async def process_session(session_id: uuid.UUID, request: Request, user: CurrentUser = Depends(writer),
                           db: AsyncSession = Depends(get_session), queue: Queue = Depends(get_sessions_queue)):
     s = await get_scoped_or_404(db, Session, session_id, user, "session")
+    # Row lock, re-read: two requests at once must not both pass the check and enqueue twice.
+    s = (await db.execute(select(Session).where(Session.id == s.id).with_for_update()
+                          .execution_options(populate_existing=True))).scalar_one()
     await service.reconcile_stale_job(db, s, queue)
     service.ensure_processable(s, await service.list_videos(db, s.id))
     job_id = str(uuid.uuid4())

@@ -212,3 +212,26 @@ async def test_session_with_a_live_job_stays_processing(client, db_session, tena
     assert (await client.get(f"/api/v1/sessions/{sid}", headers=headers)).json()["status"] == "queued"
     r = await client.post(f"/api/v1/sessions/{sid}/process", headers=headers)
     assert r.status_code == 422  # still running: not processable
+
+
+async def test_process_locks_the_session_row_before_checking_it(client, db_session, tenant, tmp_path, sessions_queue):
+    # Two tabs pressing Start at once must not both pass ensure_processable and enqueue twice.
+    from sqlalchemy import event
+
+    customer, _, headers = await tenant("operator")
+    site, cam = await _site_with_camera(db_session, customer)
+    sid = (await _create(client, headers, site, cam))["id"]
+    await tus_upload(client, headers, sid, make_clip(tmp_path / "a.mp4", seconds=1).read_bytes())
+    statements = []
+    engine = db_session.bind.sync_engine if hasattr(db_session.bind, "sync_engine") else db_session.sync_session.bind
+    listener = lambda conn, cur, stmt, *args: statements.append(stmt)  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        assert (await client.post(f"/api/v1/sessions/{sid}/process", headers=headers)).status_code == 202
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+    locks = [i for i, st in enumerate(statements) if "FOR UPDATE" in st and "FROM sessions" in st]
+    videos = [i for i, st in enumerate(statements) if "FROM session_videos" in st]
+    assert locks and videos and locks[0] < videos[0]  # locked before the videos are checked
+    assert (await client.post(f"/api/v1/sessions/{sid}/process", headers=headers)).status_code == 422
+    assert len(sessions_queue.jobs) == 1

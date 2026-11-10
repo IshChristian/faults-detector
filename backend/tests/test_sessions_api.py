@@ -1,6 +1,8 @@
 import uuid
 
-from app.models import Camera, Site
+from sqlalchemy import select
+
+from app.models import AuditLog, Camera, Site
 from tests.media import make_clip
 from tests.test_uploads import tus_upload
 
@@ -116,5 +118,8 @@ async def test_video_order_must_be_a_permutation(client, db_session, tenant, tmp
     assert (await client.put(url, json={"video_ids": [ids[0], ids[0]]}, headers=headers)).status_code == 422
     r = await client.put(url, json={"video_ids": ids[::-1]}, headers=headers)
     assert r.status_code == 200 and [v["id"] for v in r.json()["videos"]] == ids[::-1]
+    db_session.expire_all()
+    audit = (await db_session.execute(select(AuditLog).where(AuditLog.action == "session.reorder"))).scalar_one()
+    assert audit.entity_id == uuid.UUID(sid) and audit.details == {"video_ids": ids[::-1]}
     again = (await client.get(f"/api/v1/sessions/{sid}", headers=headers)).json()["videos"]
     assert [v["id"] for v in again] == ids[::-1]

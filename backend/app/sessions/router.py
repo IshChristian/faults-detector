@@ -79,7 +79,7 @@ async def update_session(session_id: uuid.UUID, body: SessionUpdate, request: Re
 
 
 @router.put("/{session_id}/video-order", response_model=SessionDetail)
-async def set_video_order(session_id: uuid.UUID, body: VideoOrder, user: CurrentUser = Depends(writer),
+async def set_video_order(session_id: uuid.UUID, body: VideoOrder, request: Request, user: CurrentUser = Depends(writer),
                           db: AsyncSession = Depends(get_session)):
     s = await get_scoped_or_404(db, Session, session_id, user, "session")
     videos = {v.id: v for v in await service.list_videos(db, s.id)}
@@ -89,6 +89,8 @@ async def set_video_order(session_id: uuid.UUID, body: VideoOrder, user: Current
     for position, video_id in enumerate(body.video_ids):
         videos[video_id].position = position
     await db.flush()
+    await record_audit(db, action="session.reorder", customer_id=s.customer_id, actor=user, entity_type="session",
+                       entity_id=s.id, details={"video_ids": [str(v) for v in body.video_ids]}, ip=client_ip(request))
     return await service.session_detail(db, s)
 
 

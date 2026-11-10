@@ -6,7 +6,7 @@ from datetime import UTC
 
 import anyio
 from fastapi import APIRouter, Depends, Request, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -88,6 +88,12 @@ async def _renumber(db: AsyncSession, session_id: uuid.UUID) -> None:
     await db.flush()
 
 
+async def _lock_session(db: AsyncSession, session_id: uuid.UUID) -> None:
+    """Row lock on the session: every position-changing step (create, complete, delete) takes it first,
+    so they run one at a time per session and always lock session before video rows."""
+    await db.execute(select(Session.id).where(Session.id == session_id).with_for_update())
+
+
 async def _get_video(db: AsyncSession, video_id: uuid.UUID, user: CurrentUser, *, lock: bool = False) -> SessionVideo:
     stmt = scoped(select(SessionVideo).where(SessionVideo.id == video_id), SessionVideo, user)
     if lock:
@@ -122,8 +128,7 @@ async def create_upload(request: Request, user: CurrentUser = Depends(writer),
                        errors=[{"field": "session_id", "message": "Upload-Metadata must include a valid session_id"}]
                        ) from e
     s = await get_scoped_or_404(db, Session, session_id, user, "session")
-    # Serialise concurrent uploads to one session so positions stay unique.
-    await db.execute(select(Session.id).where(Session.id == s.id).with_for_update())
+    await _lock_session(db, s.id)  # serialise position assignment within the session
     if s.status not in UPLOADABLE:
         raise ApiError(409, "conflict", "Conflict", f"A session that is {s.status} cannot take new videos")
     video_id = uuid.uuid4()
@@ -156,7 +161,13 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
         raise ApiError(415, "unsupported-media-type", "Unsupported media type",
                        "Content-Type must be application/offset+octet-stream")
     offset = _int_header(request, "Upload-Offset")
-    video = await _get_video(db, video_id, user, lock=True)
+    video = await _get_video(db, video_id, user)
+    # Serialise chunks of this one upload with a transaction-scoped advisory lock. Unlike a row lock it never
+    # blocks other videos' completions (which renumber sibling rows), so two uploads can run side by side.
+    got = (await db.execute(select(func.pg_try_advisory_xact_lock(func.hashtext(str(video.id)))))).scalar_one()
+    if not got:
+        raise ApiError(409, "conflict", "Conflict", "Another request is already writing to this upload")
+    await db.refresh(video)
     if video.status != "uploading":
         raise ApiError(409, "conflict", "Conflict", f"This upload is {video.status}")
     on_disk = staging.staged_size(video.id)
@@ -180,6 +191,8 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
     if position < video.size_bytes:
         return Response(status_code=204, headers=headers)
 
+    # Completion: session lock first (same order as POST/DELETE), so completions in a session run one at a time.
+    await _lock_session(db, video.session_id)
     try:
         info = await anyio.to_thread.run_sync(probe, path)
     except VideoError:
@@ -200,8 +213,10 @@ async def upload_chunk(video_id: uuid.UUID, request: Request, user: CurrentUser 
 
 
 @router.delete("/{video_id}", status_code=204)
-async def delete_upload(video_id: uuid.UUID, user: CurrentUser = Depends(writer),
+async def delete_upload(video_id: uuid.UUID, request: Request, user: CurrentUser = Depends(writer),
                         db: AsyncSession = Depends(get_session), storage: Storage = Depends(get_storage)) -> Response:
+    video = await _get_video(db, video_id, user)
+    await _lock_session(db, video.session_id)
     video = await _get_video(db, video_id, user, lock=True)
     s = await db.get(Session, video.session_id)
     if video.status not in ("uploading", "failed") and s.status in ("queued", "processing"):
@@ -212,4 +227,7 @@ async def delete_upload(video_id: uuid.UUID, user: CurrentUser = Depends(writer)
     await db.delete(video)
     await db.flush()
     await _renumber(db, video.session_id)
+    await record_audit(db, action="session.video_delete", customer_id=video.customer_id, actor=user,
+                       entity_type="session", entity_id=video.session_id, ip=client_ip(request),
+                       details={"video_id": str(video.id), "filename": video.original_filename})
     return Response(status_code=204)

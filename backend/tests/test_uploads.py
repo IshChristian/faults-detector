@@ -1,9 +1,9 @@
 import base64
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 
-from app.models import Camera, Session, SessionVideo, Site
+from app.models import AuditLog, Camera, Session, SessionVideo, Site
 from tests.media import make_clip
 
 TUS = {"Tus-Resumable": "1.0.0"}
@@ -188,6 +188,10 @@ async def test_delete_upload_renumbers_positions(client, db_session, tenant, tmp
     rest = await _videos(db_session, sid)
     assert [(v.id, v.position) for v in rest] == [(first.id, 0), (last.id, 1)]
     assert not media_storage.exists(middle.original_key)
+    db_session.expire_all()
+    audit = (await db_session.execute(select(AuditLog).where(AuditLog.action == "session.video_delete"))).scalar_one()
+    assert audit.entity_id == uuid.UUID(sid)
+    assert audit.details == {"video_id": str(middle.id), "filename": "clip.mp4"}
 
 
 async def test_delete_uploaded_video_blocked_while_queued(client, db_session, tenant, tmp_path):
@@ -197,3 +201,32 @@ async def test_delete_uploaded_video_blocked_while_queued(client, db_session, te
     assert (await client.delete(r.location, headers={**headers, **TUS})).status_code == 409
     session = await db_session.get(Session, uuid.UUID(sid))
     assert session.status == "queued"
+
+
+async def test_two_uploads_in_progress_one_completes_while_other_is_mid_upload(
+        client, db_session, tenant, tmp_path):
+    """One test client shares a single DB connection, so true parallelism is impossible here. Instead:
+    B is mid-upload when A completes (reordering B's row), then B completes. Statements are captured to prove
+    PATCH never row-locks a video before the session row, the ordering that prevents the A/B deadlock."""
+    sid, headers = await _session(client, db_session, tenant)
+    a = make_clip(tmp_path / "a.mp4", seconds=1, creation_time="2026-11-01T10:00:00Z").read_bytes()
+    b = make_clip(tmp_path / "b.mp4", seconds=1, creation_time="2026-11-01T09:00:00Z").read_bytes()
+    loc_b = (await tus_create(client, headers, sid, len(b), "b.mp4")).headers["Location"]
+    loc_a = (await tus_create(client, headers, sid, len(a), "a.mp4")).headers["Location"]
+    assert (await tus_patch(client, headers, loc_b, 0, b[:1000])).status_code == 204  # B in progress
+
+    statements: list[str] = []
+    engine = db_session.bind.sync_engine if hasattr(db_session.bind, "sync_engine") else db_session.sync_session.bind
+    listener = lambda conn, cur, stmt, *args: statements.append(stmt)  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        assert (await tus_patch(client, headers, loc_a, 0, a)).status_code == 204  # A completes
+        assert (await tus_patch(client, headers, loc_b, 1000, b[1000:])).status_code == 204  # then B
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+
+    locking = [st for st in statements if "FOR UPDATE" in st]
+    assert locking and all("FROM sessions" in st and "session_videos" not in st for st in locking)
+    videos = await _videos(db_session, sid)
+    assert [(v.original_filename, v.status, v.position) for v in videos] == [
+        ("b.mp4", "uploaded", 0), ("a.mp4", "uploaded", 1)]

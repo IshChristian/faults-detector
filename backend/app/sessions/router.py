@@ -58,8 +58,10 @@ async def list_sessions(site_id: uuid.UUID | None = None, status: SessionStatus 
 
 @router.get("/{session_id}", response_model=SessionDetail)
 async def get_session_detail(session_id: uuid.UUID, user: CurrentUser = Depends(get_current_user),
-                             db: AsyncSession = Depends(get_session)):
-    return await service.session_detail(db, await get_scoped_or_404(db, Session, session_id, user, "session"))
+                             db: AsyncSession = Depends(get_session), queue: Queue = Depends(get_sessions_queue)):
+    s = await get_scoped_or_404(db, Session, session_id, user, "session")
+    await service.reconcile_stale_job(db, s, queue)
+    return await service.session_detail(db, s)
 
 
 @router.patch("/{session_id}", response_model=SessionDetail)
@@ -102,14 +104,17 @@ async def set_video_order(session_id: uuid.UUID, body: VideoOrder, request: Requ
 async def process_session(session_id: uuid.UUID, request: Request, user: CurrentUser = Depends(writer),
                           db: AsyncSession = Depends(get_session), queue: Queue = Depends(get_sessions_queue)):
     s = await get_scoped_or_404(db, Session, session_id, user, "session")
+    await service.reconcile_stale_job(db, s, queue)
     service.ensure_processable(s, await service.list_videos(db, s.id))
-    s.status, s.progress, s.stage, s.error = "queued", 0, None, None
+    job_id = str(uuid.uuid4())
+    s.status, s.progress, s.stage, s.error, s.job_id = "queued", 0, None, None, job_id
     await db.flush()
     await record_audit(db, action="session.process", customer_id=s.customer_id, actor=user, entity_type="session",
                        entity_id=s.id, ip=client_ip(request))
     detail = await service.session_detail(db, s)
     await db.commit()  # the worker must see status=queued before it picks the job up
-    queue.enqueue("app.worker.session_jobs.process_session", str(s.id), job_timeout=12 * 3600, result_ttl=86400)
+    queue.enqueue("app.worker.session_jobs.process_session", str(s.id), job_id=job_id, job_timeout=12 * 3600,
+                  result_ttl=86400)
     return detail
 
 

@@ -22,7 +22,7 @@ from app.analysis.tracking import analyse_video
 from app.analysis.tracks_io import read_tracks, write_tracks
 from app.config import get_settings
 from app.models import Calibration, Session, SessionTrack, SessionVideo
-from app.sessions.service import list_videos, session_prefix
+from app.sessions.service import STOPPED_UNEXPECTEDLY, list_videos, session_prefix
 from app.storage.base import Storage, get_storage
 from app.storage.local import scratch_dir
 from app.video.ffmpeg import transcode_proxy
@@ -57,10 +57,10 @@ async def process_session_core(db: AsyncSession, storage: Storage, detector: Det
     assert s is not None
     try:
         await _process(db, storage, detector, s, sample_fps, tile_far_half)
-    except Exception as exc:
+    except BaseException as exc:  # also CancelledError / SystemExit: the row must never stay 'processing'
+        error = _public_error(exc) if isinstance(exc, Exception) else STOPPED_UNEXPECTEDLY
         await db.rollback()
-        await db.execute(update(Session).where(Session.id == session_id).values(
-            status="failed", error=_public_error(exc)))
+        await db.execute(update(Session).where(Session.id == session_id).values(status="failed", error=error))
         await db.commit()
         raise
 

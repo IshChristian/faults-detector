@@ -151,3 +151,62 @@ async def test_sprint_threshold_change_enqueues_metrics_unless_uploading_or_unca
         await db_session.flush()
         assert (await client.patch(url, json={"sprint_threshold_kmh": 22 + i}, headers=headers)).status_code == 200
     assert [j.func_name for j in sessions_queue.jobs] == ["app.worker.session_jobs.compute_session_metrics"] * 3
+
+
+async def _queued_session(client, db_session, tenant, tmp_path):
+    customer, _, headers = await tenant("operator")
+    site, cam = await _site_with_camera(db_session, customer)
+    sid = (await _create(client, headers, site, cam))["id"]
+    await tus_upload(client, headers, sid, make_clip(tmp_path / "a.mp4", seconds=1).read_bytes())
+    r = await client.post(f"/api/v1/sessions/{sid}/process", headers=headers)
+    assert r.status_code == 202
+    return sid, headers
+
+
+async def test_process_stores_the_rq_job_id(client, db_session, tenant, tmp_path, sessions_queue):
+    from app.models import Session
+
+    sid, _ = await _queued_session(client, db_session, tenant, tmp_path)
+    s = await db_session.get(Session, uuid.UUID(sid))
+    (job,) = sessions_queue.jobs
+    assert s.job_id == job.id
+
+
+async def test_session_whose_job_vanished_shows_failed_and_can_be_processed_again(
+        client, db_session, tenant, tmp_path, sessions_queue):
+    # The worker was OOM-killed or the container restarted: the RQ job is gone, the row still says queued.
+    sid, headers = await _queued_session(client, db_session, tenant, tmp_path)
+    (job,) = sessions_queue.jobs
+    assert (await client.get(f"/api/v1/sessions/{sid}", headers=headers)).json()["status"] == "queued"
+    job.delete()
+    data = (await client.get(f"/api/v1/sessions/{sid}", headers=headers)).json()
+    assert data["status"] == "failed" and data["error"] == "Processing stopped unexpectedly. Start it again."
+    r = await client.post(f"/api/v1/sessions/{sid}/process", headers=headers)
+    assert r.status_code == 202 and r.json()["status"] == "queued"
+
+
+async def test_processing_session_whose_job_failed_or_stopped_is_reconciled_on_process(
+        client, db_session, tenant, tmp_path, sessions_queue):
+    from rq.job import JobStatus
+
+    from app.models import Session
+
+    for status in (JobStatus.FAILED, JobStatus.STOPPED, JobStatus.CANCELED):
+        sid, headers = await _queued_session(client, db_session, tenant, tmp_path)
+        s = await db_session.get(Session, uuid.UUID(sid))
+        s.status = "processing"
+        await db_session.flush()
+        job = sessions_queue.fetch_job(s.job_id)
+        job.set_status(status)
+        r = await client.post(f"/api/v1/sessions/{sid}/process", headers=headers)
+        assert r.status_code == 202, (status, r.text)
+
+
+async def test_session_with_a_live_job_stays_processing(client, db_session, tenant, tmp_path, sessions_queue):
+    from rq.job import JobStatus
+
+    sid, headers = await _queued_session(client, db_session, tenant, tmp_path)
+    sessions_queue.jobs[0].set_status(JobStatus.STARTED)
+    assert (await client.get(f"/api/v1/sessions/{sid}", headers=headers)).json()["status"] == "queued"
+    r = await client.post(f"/api/v1/sessions/{sid}/process", headers=headers)
+    assert r.status_code == 422  # still running: not processable

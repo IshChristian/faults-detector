@@ -1,6 +1,9 @@
 import uuid
 
+import redis
 from rq import Queue
+from rq.exceptions import NoSuchJobError
+from rq.job import Job, JobStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +12,8 @@ from app.models import Session, SessionVideo
 from app.sessions.schemas import SessionDetail, SessionOut, VideoOut
 
 UPLOADABLE = ("uploading", "ready", "failed")
+STOPPED_UNEXPECTEDLY = "Processing stopped unexpectedly. Start it again."
+_DEAD_JOB = (JobStatus.FAILED, JobStatus.STOPPED, JobStatus.CANCELED)
 # A metrics recompute is queued in these states; the single sessions worker runs it after any pending processing.
 METRICS_RECOMPUTE = ("queued", "processing", "ready")
 
@@ -42,6 +47,25 @@ async def reorder_by_creation_time(db: AsyncSession, session_id: uuid.UUID) -> N
 def enqueue_metrics(queue: Queue, s: Session) -> None:
     """Queue a metrics recompute; the caller commits first so the worker sees the change."""
     queue.enqueue("app.worker.session_jobs.compute_session_metrics", str(s.id))
+
+
+async def reconcile_stale_job(db: AsyncSession, s: Session, queue: Queue) -> None:
+    """Mark a queued or processing session failed when its RQ job is gone or dead (timeout, OOM kill, restart).
+
+    A session without a job id is left alone: there is nothing to check it against. If Valkey can't be reached
+    the session is left as it is rather than failing the request.
+    """
+    if s.status not in ("queued", "processing") or s.job_id is None:
+        return
+    try:
+        status = Job.fetch(s.job_id, connection=queue.connection).get_status(refresh=False)
+    except NoSuchJobError:
+        status = None
+    except redis.RedisError:
+        return
+    if status is None or status in _DEAD_JOB:
+        s.status, s.error = "failed", STOPPED_UNEXPECTEDLY
+        await db.flush()
 
 
 def ensure_processable(s: Session, videos: list[SessionVideo]) -> None:

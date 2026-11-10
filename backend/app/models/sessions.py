@@ -1,4 +1,4 @@
-"""ORM mapping for sessions and their videos, calibrations and tracks (migration 0003)."""
+"""ORM mapping for sessions and their videos, calibrations and tracks (migrations 0003, 0004)."""
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -50,6 +50,7 @@ class Session(Base):
         UUID(as_uuid=True), ForeignKey("calibrations.id", ondelete="SET NULL"))
     quality: Mapped[dict | None] = mapped_column(JSONB)
     summary_key: Mapped[str | None] = mapped_column(Text)
+    job_id: Mapped[str | None] = mapped_column(String(64))  # the RQ job processing it (migration 0004)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = created_at()
     updated_at: Mapped[datetime] = updated_at()

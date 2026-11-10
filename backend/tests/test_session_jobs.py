@@ -264,3 +264,20 @@ async def test_metrics_job_without_tracks_is_a_no_op(client, db_session, tenant,
     await compute_metrics_core(db_session, media_storage, s.id)
     await db_session.refresh(s)
     assert s.status == "failed" and s.error == "boom" and s.summary_key is None
+
+
+async def test_base_exception_in_the_job_marks_the_session_failed(client, db_session, tenant, media_storage,
+                                                                  tmp_path):
+    # e.g. asyncio.CancelledError or SystemExit from the work-horse: the row must not stay 'processing'.
+    class Stop(BaseException):
+        pass
+
+    class StoppingDetector:
+        def detect(self, frame):
+            raise Stop()
+
+    s, _ = await _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=1)
+    with pytest.raises(Stop):
+        await _run(db_session, media_storage, s, StoppingDetector())
+    await db_session.refresh(s)
+    assert s.status == "failed" and s.error == "Processing stopped unexpectedly. Start it again."

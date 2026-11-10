@@ -101,3 +101,28 @@ async def test_viewer_cannot_create_camera(client, tenant, make_user, auth_heade
     r = await client.post("/api/v1/cameras", json={"site_id": site["id"], "name": "a", "mode": "upload",
                                                    "source_type": "file"}, headers=viewer)
     assert r.status_code == 403
+
+
+async def test_operator_can_add_an_upload_camera_and_it_is_audited(client, db_session, tenant, make_user,
+                                                                   auth_headers):
+    # A Coach adds a pitch position while creating a session.
+    from app.models import AuditLog
+
+    c, _, h = await tenant()
+    site = await _site(client, h)
+    coach = await make_user(c, "operator")
+    r = await client.post("/api/v1/cameras", json={"site_id": site["id"], "name": "Halfway line", "mode": "upload",
+                                                   "source_type": "phone"}, headers=auth_headers(coach))
+    assert r.status_code == 201, r.text
+    audit = (await db_session.execute(select(AuditLog).where(
+        AuditLog.action == "camera.create", AuditLog.entity_id == r.json()["id"]))).scalar_one()
+    assert audit.actor_user_id == coach.id
+
+
+async def test_operator_cannot_add_a_live_camera(client, tenant, make_user, auth_headers):
+    c, _, h = await tenant()
+    site = await _site(client, h)
+    coach = auth_headers(await make_user(c, "operator"))
+    r = await client.post("/api/v1/cameras", json={"site_id": site["id"], "name": "Gate", "mode": "live",
+                                                   "frigate_name": "gate", "source_type": "rtsp"}, headers=coach)
+    assert r.status_code == 403

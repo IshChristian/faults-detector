@@ -41,6 +41,8 @@ export function authHandlers(user: TestUser = coach, password = "Passw0rd!long")
     }),
     http.post(`${API}/auth/logout`, () => new HttpResponse(null, { status: 204 })),
     http.get(`${API}/auth/me`, () => HttpResponse.json(user)),
+    http.get(`${API}/sessions`, () => HttpResponse.json({ items: [], next_cursor: null })),
+    http.get(`${API}/sites`, () => HttpResponse.json({ items: [], next_cursor: null })),
   ];
 }
 

@@ -80,12 +80,15 @@ def detect_with_far_half_tiling(detector: Detector, frame_bgr: np.ndarray) -> De
     full = detector.detect(frame_bgr)
     tile = cv2.resize(frame_bgr[: h // 2], (w * 2, (h // 2) * 2), interpolation=cv2.INTER_LINEAR)
     t = detector.detect(tile)
+    # A box ending within 1 px of the tile's bottom edge is clipped (someone straddling the middle of the frame):
+    # its IoU with the full-frame box is too low for NMS to merge them, so drop it and keep the full-frame one.
+    whole = t.xyxy[:, 3] < 1.0 - 1.0 / tile.shape[0]
     # The tile spans the full width and the top half of the frame: only y shrinks, by 2.
-    t_xyxy = t.xyxy.copy()
+    t_xyxy = t.xyxy[whole].copy()
     t_xyxy[:, [1, 3]] *= 0.5
     xyxy = np.concatenate([full.xyxy, t_xyxy]).astype(np.float32)
-    score = np.concatenate([full.score, t.score]).astype(np.float32)
-    cls = np.concatenate([full.cls, t.cls]).astype(np.int8)
+    score = np.concatenate([full.score, t.score[whole]]).astype(np.float32)
+    cls = np.concatenate([full.cls, t.cls[whole]]).astype(np.int8)
     keep_all: list[int] = []
     for c in (PERSON, BALL):
         idx = np.flatnonzero(cls == c)

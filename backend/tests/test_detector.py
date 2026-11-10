@@ -111,3 +111,21 @@ def test_onnx_detector_finds_people_on_real_frame():
     frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
     out = det.OnnxRfDetr(REAL_MODEL).detect(frame)
     assert int((out.cls == PERSON).sum()) >= 5
+
+
+def test_tiling_drops_tile_boxes_clipped_by_the_tile_bottom_edge():
+    # A player straddling the frame's middle: the tile sees only their top half (box ends on the tile's edge).
+    # That clipped box overlaps the full-frame box with IoU < 0.5, so NMS alone would keep a duplicate person.
+    full_box = [0.40, 0.40, 0.45, 0.70]
+    clipped = [0.40, 0.80, 0.45, 0.999]  # tile-relative; tile is 100 px tall, so within 1 px of the bottom
+    fake = ScriptedDetector(_dets([full_box], [0.8], [PERSON]), _dets([clipped], [0.9], [PERSON]))
+    out = detect_with_far_half_tiling(fake, np.zeros((100, 200, 3), np.uint8))
+    assert len(out.score) == 1
+    np.testing.assert_allclose(out.xyxy[0], full_box, atol=1e-6)
+
+
+def test_tiling_keeps_tile_boxes_that_end_above_the_edge():
+    near_edge = [0.10, 0.80, 0.15, 0.97]  # 3 px above the tile's bottom edge
+    fake = ScriptedDetector(Detections.empty(), _dets([near_edge], [0.9], [PERSON]))
+    out = detect_with_far_half_tiling(fake, np.zeros((100, 200, 3), np.uint8))
+    assert len(out.score) == 1

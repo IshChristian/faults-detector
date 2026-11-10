@@ -312,18 +312,18 @@ test("polls while processing and stops when ready", async () => {
       });
     }),
   );
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
   signedInAs(coach, "/sessions/s-1");
-  await vi.waitFor(() => expect(screen.getByText(/Processing 30%/)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Processing 30%/)).toBeInTheDocument());
   expect(calls).toBe(1);
 
   await act(() => vi.advanceTimersByTimeAsync(4900));
   expect(calls).toBe(1);
   await act(() => vi.advanceTimersByTimeAsync(200));
-  await vi.waitFor(() => expect(screen.getByText(/Processing 60%/)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Processing 60%/)).toBeInTheDocument());
   expect(calls).toBe(2);
   await act(() => vi.advanceTimersByTimeAsync(5000));
-  await vi.waitFor(() => expect(screen.getByText("Ready")).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText("Ready")).toBeInTheDocument());
   expect(calls).toBe(3);
 
   await act(() => vi.advanceTimersByTimeAsync(30000));
@@ -338,9 +338,9 @@ test("polling stops when the page unmounts", async () => {
       return HttpResponse.json({ ...sessionRow({ status: "processing", progress: 10 }), videos: [video("a", 0)] });
     }),
   );
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
   const view = signedInAs(coach, "/sessions/s-1");
-  await vi.waitFor(() => expect(screen.getByText(/Processing 10%/)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/Processing 10%/)).toBeInTheDocument());
   view.unmount();
   await act(() => vi.advanceTimersByTimeAsync(20000));
   expect(calls).toBe(1);

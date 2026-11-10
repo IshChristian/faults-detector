@@ -281,3 +281,82 @@ async def test_base_exception_in_the_job_marks_the_session_failed(client, db_ses
         await _run(db_session, media_storage, s, StoppingDetector())
     await db_session.refresh(s)
     assert s.status == "failed" and s.error == "Processing stopped unexpectedly. Start it again."
+
+
+async def test_summary_serves_offsets_fixed_at_processing_time(client, db_session, tenant, media_storage, tmp_path):
+    # Parquet t_ms were laid out with the durations at processing time; GET /summary must not recompute them.
+    s, headers = await _setup(client, db_session, tenant, media_storage, tmp_path)
+    await _run(db_session, media_storage, s)
+    first, second = await _videos(db_session, s.id)
+    doc = json.loads(media_storage.open(s.summary_key).read())
+    assert doc["videos"] == [{"video_id": str(first.id), "t_offset_ms": 0},
+                             {"video_id": str(second.id), "t_offset_ms": first.duration_ms}]
+    processed_offset = first.duration_ms
+    first.duration_ms += 5000  # anything that changes durations afterwards must not shift the served offsets
+    await db_session.flush()
+    body = (await client.get(f"/api/v1/sessions/{s.id}/summary", headers=headers)).json()
+    assert [(p["video_id"], p["t_offset_ms"]) for p in body["proxies"]] == [
+        (str(first.id), 0), (str(second.id), processed_offset)]
+
+
+async def test_new_upload_on_a_ready_session_invalidates_the_results(client, db_session, tenant, media_storage,
+                                                                     tmp_path):
+    from tests.test_uploads import tus_upload
+
+    s, headers = await _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=1)
+    await _run(db_session, media_storage, s)
+    r = await tus_upload(client, headers, s.id, make_clip(tmp_path / "new.mp4", seconds=1).read_bytes())
+    assert r.status_code == 204
+    await db_session.refresh(s)
+    assert s.status == "uploading" and s.summary_key is None
+    statuses = sorted(v.status for v in await _videos(db_session, s.id))
+    assert statuses == ["processed", "uploaded"]  # videos keep their own status
+    r = await client.get(f"/api/v1/sessions/{s.id}/summary", headers=headers)
+    assert r.status_code == 409
+    assert (await client.post(f"/api/v1/sessions/{s.id}/process", headers=headers)).status_code == 202
+
+
+async def test_deleting_a_processed_video_removes_its_proxy_and_frames_and_invalidates(
+        client, db_session, tenant, media_storage, tmp_path):
+    from tests.test_uploads import TUS
+
+    s, headers = await _setup(client, db_session, tenant, media_storage, tmp_path)
+    await _run(db_session, media_storage, s)
+    first, second = await _videos(db_session, s.id)
+    for v in (first, second):
+        r = await client.get(f"/api/v1/sessions/{s.id}/videos/{v.id}/frame?t_ms=0", headers=headers)
+        assert r.status_code == 200, r.text
+    prefix = session_prefix(s)
+    first_frame, second_frame = (f"{prefix}/analysis/frame_{v.id}_0.jpg" for v in (first, second))
+    proxy = first.proxy_key
+    assert media_storage.exists(proxy) and media_storage.exists(first_frame)
+    assert (await client.delete(f"/api/v1/uploads/{first.id}", headers={**headers, **TUS})).status_code == 204
+    assert not media_storage.exists(proxy) and not media_storage.exists(first_frame)
+    assert media_storage.exists(second.proxy_key) and media_storage.exists(second_frame)
+    await db_session.refresh(s)
+    assert s.status == "uploading" and s.summary_key is None
+
+
+async def test_reorder_invalidates_ready_results_only_when_the_order_changes(client, db_session, tenant,
+                                                                             media_storage, tmp_path):
+    s, headers = await _setup(client, db_session, tenant, media_storage, tmp_path)
+    await _run(db_session, media_storage, s)
+    first, second = await _videos(db_session, s.id)
+    url = f"/api/v1/sessions/{s.id}/video-order"
+    r = await client.put(url, json={"video_ids": [str(first.id), str(second.id)]}, headers=headers)
+    assert r.status_code == 200 and r.json()["status"] == "ready"
+    r = await client.put(url, json={"video_ids": [str(second.id), str(first.id)]}, headers=headers)
+    assert r.status_code == 200 and r.json()["status"] == "uploading"
+    await db_session.refresh(s)
+    assert s.summary_key is None
+
+
+async def test_reorder_is_409_while_queued_or_processing(client, db_session, tenant, media_storage, tmp_path):
+    s, headers = await _setup(client, db_session, tenant, media_storage, tmp_path)
+    first, second = await _videos(db_session, s.id)
+    for status in ("queued", "processing"):
+        s.status = status
+        await db_session.flush()
+        r = await client.put(f"/api/v1/sessions/{s.id}/video-order",
+                             json={"video_ids": [str(second.id), str(first.id)]}, headers=headers)
+        assert r.status_code == 409, r.text

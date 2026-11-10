@@ -68,6 +68,14 @@ async def reconcile_stale_job(db: AsyncSession, s: Session, queue: Queue) -> Non
         await db.flush()
 
 
+def invalidate_results(s: Session) -> None:
+    """The video set or order changed: a ready or failed session's results no longer match its videos.
+
+    Back to 'uploading' so it must be processed again; videos keep their own status."""
+    if s.status in ("ready", "failed"):
+        s.status, s.summary_key, s.error = "uploading", None, None
+
+
 def ensure_processable(s: Session, videos: list[SessionVideo]) -> None:
     if s.status not in UPLOADABLE:
         raise ApiError(422, "not-processable", "Session cannot be processed",

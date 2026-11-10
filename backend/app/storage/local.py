@@ -78,6 +78,14 @@ class LocalStorage:
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
 
+    def delete_matching(self, dir_key: str, pattern: str) -> None:
+        """Delete the files directly under `dir_key` whose names match the glob `pattern`."""
+        directory = self._path(dir_key)
+        if directory.is_dir():
+            for path in directory.glob(pattern):
+                if path.is_file() and path.resolve().parent == directory:
+                    path.unlink(missing_ok=True)
+
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
 

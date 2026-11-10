@@ -17,7 +17,8 @@ from app.common.request import client_ip
 from app.config import get_settings
 from app.db import get_session
 from app.models import Session, SessionVideo
-from app.sessions.service import UPLOADABLE, list_videos, reorder_by_creation_time, session_prefix
+from app.sessions.service import (UPLOADABLE, invalidate_results, list_videos, reorder_by_creation_time,
+                                  session_prefix)
 from app.storage.base import Storage, get_storage
 from app.tenancy.scoping import get_scoped_or_404, scoped
 from app.uploads import staging
@@ -143,6 +144,7 @@ async def create_upload(request: Request, user: CurrentUser = Depends(writer),
     await _lock_session(db, s.id)  # serialise position assignment within the session
     if s.status not in UPLOADABLE:
         raise ApiError(409, "conflict", "Conflict", f"A session that is {s.status} cannot take new videos")
+    invalidate_results(s)
     video_id = uuid.uuid4()
     count = len(await list_videos(db, s.id))
     video = SessionVideo(
@@ -238,6 +240,10 @@ async def delete_upload(video_id: uuid.UUID, request: Request, user: CurrentUser
     staging.remove_staging(video.id)
     if video.status in ("uploaded", "processed"):
         await anyio.to_thread.run_sync(storage.delete, video.original_key)
+    if video.proxy_key:
+        await anyio.to_thread.run_sync(storage.delete, video.proxy_key)
+    await anyio.to_thread.run_sync(storage.delete_matching, f"{session_prefix(s)}/analysis", f"frame_{video.id}_*.jpg")
+    invalidate_results(s)
     await db.delete(video)
     await db.flush()
     await _renumber(db, video.session_id)

@@ -123,7 +123,8 @@ async def _process(db: AsyncSession, storage: Storage, detector: Detector, s: Se
         if len(result.table):
             next_track_id = max(next_track_id, int(result.table["track_id"].to_numpy().max()) + 1)
         expected = round((video.duration_ms or 0) / 1000 * sample_fps)
-        quality_videos.append({"video_id": str(video.id), "frames": result.frames, "expected_frames": expected,
+        quality_videos.append({"video_id": str(video.id), "t_offset_ms": t_offset_ms, "frames": result.frames,
+                               "expected_frames": expected,
                                "truncated": expected > 0 and result.frames < TRUNCATED_BELOW * expected})
         t_offset_ms += video.duration_ms or 0
         done += weight * (TRANSCODE_SHARE + ANALYSE_SHARE)
@@ -232,7 +233,9 @@ async def compute_metrics_core(db: AsyncSession, storage: Storage, session_id: u
 
     summary = build_summary(duration_ms=duration_ms, sample_fps=sample_fps, calibrated=cal is not None,
                             quality=qual, teams_overview=overview, intensity=intensity, team_shape=shape,
-                            tracks_total=len(rows))
+                            tracks_total=len(rows),
+                            videos=[{"video_id": v["video_id"], "t_offset_ms": v.get("t_offset_ms", 0)}
+                                    for v in prior_videos])
     storage.save(summary_key, _json_bytes(summary))
     s.quality, s.summary_key = qual, summary_key
     await db.flush()

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_audit
 from app.auth.deps import CurrentUser, get_current_user, require_roles
-from app.common.errors import ApiError
+from app.common.errors import ApiError, conflict
 from app.common.pagination import Page, limit_param, paginate
 from app.common.request import client_ip
 from app.db import get_session
@@ -88,10 +88,15 @@ async def update_session(session_id: uuid.UUID, body: SessionUpdate, request: Re
 async def set_video_order(session_id: uuid.UUID, body: VideoOrder, request: Request, user: CurrentUser = Depends(writer),
                           db: AsyncSession = Depends(get_session)):
     s = await get_scoped_or_404(db, Session, session_id, user, "session")
-    videos = {v.id: v for v in await service.list_videos(db, s.id)}
+    if s.status in ("queued", "processing"):
+        raise conflict("The session is being processed; wait for it to finish")
+    current = await service.list_videos(db, s.id)
+    videos = {v.id: v for v in current}
     if len(body.video_ids) != len(videos) or set(body.video_ids) != set(videos):
         raise ApiError(422, "validation", "Validation failed",
                        errors=[{"field": "video_ids", "message": "must list each of the session's videos exactly once"}])
+    if [v.id for v in current] != body.video_ids:
+        service.invalidate_results(s)
     for position, video_id in enumerate(body.video_ids):
         videos[video_id].position = position
     await db.flush()
@@ -126,12 +131,11 @@ async def get_summary(session_id: uuid.UUID, user: CurrentUser = Depends(get_cur
         raise ApiError(409, "not-ready", "Session not ready", detail="The session has not finished processing")
     with storage.open(s.summary_key) as f:
         summary = json.load(f)
-    proxies, offset = [], 0
-    for v in await service.list_videos(db, s.id):
-        if v.proxy_key:
-            proxies.append({"video_id": str(v.id), "url": sign_media_url(v.proxy_key, ttl_seconds=3600),
-                            "t_offset_ms": offset})
-        offset += v.duration_ms or 0
+    # Offsets come from processing time: the tracks' t_ms were laid out with them.
+    videos = {str(v.id): v for v in await service.list_videos(db, s.id)}
+    proxies = [{"video_id": entry["video_id"], "url": sign_media_url(v.proxy_key, ttl_seconds=3600),
+                "t_offset_ms": entry["t_offset_ms"]}
+               for entry in summary.get("videos", []) if (v := videos.get(entry["video_id"])) and v.proxy_key]
     return {**summary, "proxies": proxies}
 
 

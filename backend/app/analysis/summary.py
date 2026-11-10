@@ -13,15 +13,19 @@ def build_summary(
     intensity: list[dict],
     team_shape: list[dict],
     tracks_total: int,
+    videos: list[dict],
 ) -> dict:
     """Assemble summary.json. Distances and speeds come from projected video
-    positions, so every block carrying them is flagged "approximate"."""
+    positions, so every block carrying them is flagged "approximate".
+
+    `videos` lists {video_id, t_offset_ms} in session order, fixed when the tracks were written."""
     return {
         "version": SUMMARY_VERSION,
         "duration_ms": duration_ms,
         "sample_fps": sample_fps,
         "calibrated": calibrated,
         "tracks_total": tracks_total,
+        "videos": videos,
         "quality": quality,
         # per team: players_on_pitch_avg, distance_m_total, heatmap
         "teams": {name: {**team, "approximate": True} for name, team in teams_overview.items()},

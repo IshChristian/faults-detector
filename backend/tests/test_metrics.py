@@ -153,8 +153,9 @@ def test_summary_marks_distances_approximate():
         intensity=[{"t_ms": 0, "mean_speed_kmh": 5.0}],
         team_shape=[],
         tracks_total=12,
+        videos=[{"video_id": "v1", "t_offset_ms": 0}],
     )
-    assert s["version"] == 1
+    assert s["version"] == 1 and s["videos"] == [{"video_id": "v1", "t_offset_ms": 0}]
     assert s["teams"]["a"]["approximate"] is True
     assert s["intensity"]["approximate"] is True
     assert s["intensity"]["timeline"][0]["mean_speed_kmh"] == 5.0

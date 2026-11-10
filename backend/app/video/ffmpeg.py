@@ -175,19 +175,25 @@ def iter_frames(src: Path, sample_fps: float) -> Iterator[tuple[int, np.ndarray]
         "-i", str(src), "-vf", f"fps={sample_fps}",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
     ]  # fmt: skip
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    try:
-        assert proc.stdout is not None
-        i = 0
-        while True:
-            buf = proc.stdout.read(size)
-            if len(buf) < size:
-                break
-            yield round(i * 1000 / sample_fps), np.frombuffer(buf, np.uint8).reshape(h, w, 3)
-            i += 1
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        if proc.stdout:
-            proc.stdout.close()
-        proc.wait()
+    # stderr goes to a temp file (not a pipe) so a chatty ffmpeg can never deadlock against our stdout reads.
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err)
+        try:
+            assert proc.stdout is not None
+            i = 0
+            while True:
+                buf = proc.stdout.read(size)
+                if len(buf) < size:
+                    break
+                yield round(i * 1000 / sample_fps), np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+                i += 1
+            # Reached only when the stream ended on its own; an early close skips straight to `finally`.
+            if proc.wait() != 0:
+                err.seek(0)
+                raise VideoError(f"frame extraction failed: {err.read().decode(errors='replace')[-500:]}")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            if proc.stdout:
+                proc.stdout.close()
+            proc.wait()

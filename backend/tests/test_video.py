@@ -1,3 +1,5 @@
+import os
+import subprocess
 from datetime import UTC, datetime
 
 import pytest
@@ -94,3 +96,48 @@ def test_extract_frame_writes_jpeg(tmp_path):
 def test_extract_frame_failure_raises(tmp_path):
     with pytest.raises(VideoError):
         extract_frame(tmp_path / "missing.mp4", 0, tmp_path / "f.jpg")
+
+
+def _fake_ffmpeg(tmp_path, monkeypatch, body: str):
+    """Put a fake `ffmpeg` first on PATH (ffprobe stays real)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    script = bindir / "ffmpeg"
+    script.write_text("#!/bin/sh\n" + body)
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+
+def test_iter_frames_raises_when_ffmpeg_fails_mid_stream(tmp_path, monkeypatch):
+    clip = make_clip(tmp_path / "a.mp4", seconds=1, size="320x180")
+    # One full 320x180 BGR frame, then a decode error and a non-zero exit.
+    _fake_ffmpeg(tmp_path, monkeypatch, "head -c 172800 /dev/zero\necho 'boom: decode failed' >&2\nexit 1\n")
+    seen = []
+    with pytest.raises(VideoError, match="boom: decode failed"):
+        for item in iter_frames(clip, 10):
+            seen.append(item)
+    assert len(seen) == 1
+
+
+def test_iter_frames_early_close_does_not_raise_on_ffmpeg_failure(tmp_path, monkeypatch):
+    clip = make_clip(tmp_path / "a.mp4", seconds=1, size="320x180")
+    _fake_ffmpeg(tmp_path, monkeypatch, "head -c 172800 /dev/zero\nsleep 5\nexit 1\n")
+    gen = iter_frames(clip, 10)
+    next(gen)
+    gen.close()  # consumer stopped early: ffmpeg is killed silently
+
+
+def test_iter_frames_on_truncated_mp4_yields_fewer_frames_without_error(tmp_path):
+    # Documents ffmpeg's behaviour: a truncated mp4 (moov at the front, so it still probes) makes ffmpeg
+    # log "partial file" but exit 0, so iter_frames cannot tell it from a normal short video.
+    full = make_clip(tmp_path / "full.mp4", seconds=3, size="320x180")
+    faststart = tmp_path / "fs.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(full), "-c", "copy",
+         "-movflags", "+faststart", str(faststart)],
+        check=True,
+    )  # fmt: skip
+    cut = tmp_path / "cut.mp4"
+    cut.write_bytes(faststart.read_bytes()[: faststart.stat().st_size // 2])
+    frames = list(iter_frames(cut, 10))
+    assert 0 < len(frames) < 30

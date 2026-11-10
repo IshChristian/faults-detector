@@ -56,13 +56,18 @@ def _is_simple_quad(pts: Sequence[Point]) -> bool:
 
 
 def _solve_homography(src: Sequence[Point], dst: Sequence[Point]) -> np.ndarray:
-    """Exact 4-point DLT in float64 (cv2.getPerspectiveTransform only takes float32, ~1e-5 m error)."""
-    rows, rhs = [], []
+    """Exact 4-point DLT in float64 via the SVD null space (cv2.getPerspectiveTransform only takes float32).
+
+    Unlike fixing h33 = 1, the null space also covers h33 = 0 (the image origin on the horizon). The overall
+    sign is chosen so that w > 0 at the centroid of the clicked points: the image origin is often sky, above the
+    horizon, and must not decide which side of the horizon is the pitch.
+    """
+    rows = []
     for (x, y), (u, v) in zip(src, dst):
-        rows += [[x, y, 1, 0, 0, 0, -u * x, -u * y], [0, 0, 0, x, y, 1, -v * x, -v * y]]
-        rhs += [u, v]
-    h = np.linalg.solve(np.array(rows, dtype=np.float64), np.array(rhs, dtype=np.float64))
-    return np.append(h, 1.0).reshape(3, 3)
+        rows += [[x, y, 1, 0, 0, 0, -u * x, -u * y, -u], [0, 0, 0, x, y, 1, -v * x, -v * y, -v]]
+    H = np.linalg.svd(np.array(rows, dtype=np.float64))[2][-1].reshape(3, 3)
+    cx, cy = np.mean(np.asarray(src, dtype=np.float64), axis=0)
+    return -H if H[2] @ (cx, cy, 1.0) < 0 else H
 
 
 def fit_homography(image_pts: list[Point], pitch_pts: list[Point]) -> np.ndarray:
@@ -80,7 +85,11 @@ def fit_homography(image_pts: list[Point], pitch_pts: list[Point]) -> np.ndarray
     if (not _is_simple_quad(img_up) or not _is_simple_quad(pitch)
             or (_signed_area(img_up) > 0) != (_signed_area(pitch) > 0)):
         raise CalibrationError("The points cross over; click them in the same order as the pitch points")
-    return _solve_homography(img, pitch)
+    H = _solve_homography(img, pitch)
+    w = np.hstack([np.array(img), np.ones((4, 1))]) @ H[2]
+    if not (np.all(np.isfinite(H)) and np.all(w > 0) and np.all(np.isfinite(project(H, np.array(img))))):
+        raise CalibrationError("These points can't all be on the pitch; pick points on the pitch below the horizon")
+    return H
 
 
 def project(H: np.ndarray, pts: np.ndarray) -> np.ndarray:

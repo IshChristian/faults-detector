@@ -89,7 +89,8 @@ function needsRefresh(token: string | null): boolean {
 /**
  * Start (or resume) a resumable tus upload. The Authorization header is set per request from
  * the current in-memory token, so a long upload keeps working across access-token refreshes.
- * Re-selecting the same file resumes the earlier upload via tus's stored fingerprint.
+ * Re-selecting the same file in the same session resumes the earlier upload via tus's stored fingerprint;
+ * the fingerprint includes the session, so the same file in another session starts a new upload.
  */
 export function uploadFile(sessionId: string, file: File, cb: UploadCallbacks): Upload {
   let signedOut = false;
@@ -99,6 +100,10 @@ export function uploadFile(sessionId: string, file: File, cb: UploadCallbacks): 
     retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
     metadata: { session_id: sessionId, filename: file.name },
     removeFingerprintOnSuccess: true,
+    fingerprint: async (f) => {
+      const file = f as File;
+      return ["vg", sessionId, file.name, file.type, file.size, file.lastModified].join("-");
+    },
     async onBeforeRequest(req) {
       // The access token lives ~15 min; long uploads must refresh it (concurrent refreshes are shared).
       if (needsRefresh(getAccessToken()) && !(await refreshSession())) {
@@ -122,9 +127,12 @@ export function uploadFile(sessionId: string, file: File, cb: UploadCallbacks): 
     },
     onSuccess: cb.onSuccess,
   });
-  void upload.findPreviousUploads().then((previous) => {
-    if (previous.length > 0) upload.resumeFromPreviousUpload(previous[0]);
-    upload.start();
-  });
+  void upload
+    .findPreviousUploads()
+    .then((previous) => {
+      if (previous.length > 0) upload.resumeFromPreviousUpload(previous[0]);
+    })
+    .catch(() => {}) // no stored uploads to resume (e.g. storage blocked): start a fresh one
+    .then(() => upload.start());
   return upload;
 }

@@ -14,6 +14,7 @@ type FakeOptions = {
   endpoint: string;
   metadata: Record<string, string>;
   removeFingerprintOnSuccess: boolean;
+  fingerprint?: (file: File, options: unknown) => Promise<string>;
   onBeforeRequest?: (req: { setHeader(name: string, value: string): void }) => void | Promise<void>;
   onShouldRetry?: (err: { originalResponse?: { getStatus(): number } }, attempt: number) => boolean;
   onProgress?: (sent: number, total: number) => void;
@@ -30,7 +31,8 @@ const tus = vi.hoisted(() => ({
     resumed: unknown;
     abort: () => void;
   }>,
-  previous: [] as unknown[],
+  previous: [] as Array<{ fingerprint?: string; uploadUrl: string }>,
+  failFind: false,
 }));
 
 vi.mock("tus-js-client", () => {
@@ -45,9 +47,15 @@ vi.mock("tus-js-client", () => {
     ) {
       tus.uploads.push(this);
     }
+    // Like tus-js-client: previous uploads are looked up by fingerprint, by default name-type-size-lastModified-endpoint.
     async findPreviousUploads() {
-      this.previous = tus.previous;
-      return tus.previous;
+      if (tus.failFind) throw new Error("storage unavailable");
+      const f = this.file;
+      const fp = this.options.fingerprint
+        ? await this.options.fingerprint(f, this.options)
+        : ["tus-br", f.name, f.type, f.size, f.lastModified, this.options.endpoint].join("-");
+      this.previous = tus.previous.filter((p) => p.fingerprint === fp);
+      return this.previous;
     }
     resumeFromPreviousUpload(prev: unknown) {
       this.resumed = prev;
@@ -62,6 +70,7 @@ vi.mock("tus-js-client", () => {
 afterEach(() => {
   tus.uploads.length = 0;
   tus.previous = [];
+  tus.failFind = false;
   vi.useRealTimers();
   setAccessToken(null);
 });
@@ -430,9 +439,10 @@ test("viewer sees no New session button", async () => {
 });
 
 test("uploadFile resumes a previous upload and sends the current token on every request", async () => {
-  tus.previous = [{ uploadUrl: "/api/v1/uploads/abc" }];
+  const file = new File(["x"], "clip.mp4", { type: "video/mp4" });
+  tus.previous = [{ fingerprint: ["vg", "s-1", "clip.mp4", "video/mp4", 1, file.lastModified].join("-"), uploadUrl: "/api/v1/uploads/abc" }];
   setAccessToken("token-1");
-  uploadFile("s-1", new File(["x"], "clip.mp4", { type: "video/mp4" }), {
+  uploadFile("s-1", file, {
     onProgress: () => {},
     onError: () => {},
     onSuccess: () => {},
@@ -448,6 +458,35 @@ test("uploadFile resumes a previous upload and sends the current token on every 
   expect(seen).toEqual(["Authorization=Bearer token-1", "Authorization=Bearer token-2"]);
 });
 
+
+test("the same file in another session starts a new upload instead of resuming the first session's", async () => {
+  // The default tus fingerprint has no session in it: the bytes would go to the first session's upload.
+  const file = new File(["x"], "clip.mp4", { type: "video/mp4" });
+  const cb = { onProgress: () => {}, onError: () => {}, onSuccess: () => {} };
+  uploadFile("s-1", file, cb);
+  await waitFor(() => expect(tus.uploads[0]?.started).toBe(true));
+  const first = await tus.uploads[0].options.fingerprint!(file, tus.uploads[0].options);
+  tus.previous = [{ fingerprint: first, uploadUrl: "/api/v1/uploads/first" }];
+
+  uploadFile("s-2", file, cb);
+  await waitFor(() => expect(tus.uploads[1]?.started).toBe(true));
+  expect(tus.uploads[1].resumed).toBeNull();
+
+  uploadFile("s-1", file, cb); // re-selecting it in the same session still resumes
+  await waitFor(() => expect(tus.uploads[2]?.started).toBe(true));
+  expect(tus.uploads[2].resumed).toEqual(tus.previous[0]);
+});
+
+test("the upload still starts when looking up previous uploads fails", async () => {
+  tus.failFind = true;
+  uploadFile("s-1", new File(["x"], "clip.mp4", { type: "video/mp4" }), {
+    onProgress: () => {},
+    onError: () => {},
+    onSuccess: () => {},
+  });
+  await waitFor(() => expect(tus.uploads[0]?.started).toBe(true));
+  expect(tus.uploads[0].resumed).toBeNull();
+});
 
 function jwt(expInSeconds: number) {
   const b64 = (o: object) => btoa(JSON.stringify(o)).replace(/=+$/, "");

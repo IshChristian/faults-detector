@@ -161,15 +161,21 @@ async def _process(db: AsyncSession, storage: Storage, detector: Detector, s: Se
 
 
 async def compute_metrics_core(db: AsyncSession, storage: Storage, session_id: uuid.UUID) -> None:
-    """Fill person metrics from the stored tracks and write summary.json; never touches status."""
-    s = await db.get(Session, session_id)
+    """Fill person metrics from the stored tracks and write summary.json; never touches status.
+
+    The session and calibration are read fresh: a calibration or sprint threshold saved while the session was
+    processing must count. Without a tracks file (nothing processed yet, or processing failed) it does nothing.
+    """
+    s = await db.get(Session, session_id, populate_existing=True)
     assert s is not None
-    videos = await list_videos(db, session_id)
-    cal = await db.get(Calibration, s.calibration_id) if s.calibration_id else None
     tracks_key, summary_key = _keys(session_prefix(s))
     tracks_path = storage.local_path(tracks_key)
     if tracks_path is None:
         raise RuntimeError("the tracks file is not available on local storage")
+    if not tracks_path.is_file():
+        return
+    videos = await list_videos(db, session_id)
+    cal = await db.get(Calibration, s.calibration_id, populate_existing=True) if s.calibration_id else None
     table = read_tracks(tracks_path)
     sample_fps = get_settings().analysis_sample_fps
     duration_ms = sum(v.duration_ms or 0 for v in videos)

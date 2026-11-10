@@ -1,5 +1,6 @@
 import uuid
 
+from rq import Queue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +9,8 @@ from app.models import Session, SessionVideo
 from app.sessions.schemas import SessionDetail, SessionOut, VideoOut
 
 UPLOADABLE = ("uploading", "ready", "failed")
+# A metrics recompute is queued in these states; the single sessions worker runs it after any pending processing.
+METRICS_RECOMPUTE = ("queued", "processing", "ready")
 
 
 def session_prefix(s: Session) -> str:
@@ -34,6 +37,11 @@ async def reorder_by_creation_time(db: AsyncSession, session_id: uuid.UUID) -> N
     for position, video in enumerate(timed + untimed):
         video.position = position
     await db.flush()  # (session_id, position) is deferrable, so renumbering in any order is safe
+
+
+def enqueue_metrics(queue: Queue, s: Session) -> None:
+    """Queue a metrics recompute; the caller commits first so the worker sees the change."""
+    queue.enqueue("app.worker.session_jobs.compute_session_metrics", str(s.id))
 
 
 def ensure_processable(s: Session, videos: list[SessionVideo]) -> None:

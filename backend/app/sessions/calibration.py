@@ -150,9 +150,9 @@ async def save_calibration(session_id: uuid.UUID, body: CalibrationCreate, reque
                        entity_id=s.id, details={"calibration_id": str(cal.id), "reused": body.reuse_calibration_id
                                                 is not None}, ip=client_ip(request))
     out = CalibrationSaved(calibration=CalibrationOut.of(cal), session=await service.session_detail(db, s))
-    if s.status == "ready":
+    if s.status in service.METRICS_RECOMPUTE:
         await db.commit()  # the worker must see the new calibration
-        queue.enqueue("app.worker.session_jobs.compute_session_metrics", str(s.id))
+        service.enqueue_metrics(queue, s)
     return out
 
 

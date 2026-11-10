@@ -123,3 +123,31 @@ async def test_video_order_must_be_a_permutation(client, db_session, tenant, tmp
     assert audit.entity_id == uuid.UUID(sid) and audit.details == {"video_ids": ids[::-1]}
     again = (await client.get(f"/api/v1/sessions/{sid}", headers=headers)).json()["videos"]
     assert [v["id"] for v in again] == ids[::-1]
+
+
+async def test_sprint_threshold_change_enqueues_metrics_unless_uploading_or_uncalibrated(
+        client, db_session, tenant, sessions_queue):
+    from app.models import Calibration, Session
+
+    customer, _, headers = await tenant("operator")
+    site, cam = await _site_with_camera(db_session, customer)
+    sid = (await _create(client, headers, site, cam))["id"]
+    s = await db_session.get(Session, uuid.UUID(sid))
+    url = f"/api/v1/sessions/{sid}"
+    s.status = "ready"
+    await db_session.flush()
+    assert (await client.patch(url, json={"sprint_threshold_kmh": 20}, headers=headers)).status_code == 200
+    assert sessions_queue.jobs == []  # uncalibrated: nothing to recompute
+    cal = Calibration(customer_id=customer.id, camera_id=cam.id, image_points=[], pitch_points=[],
+                      pitch_length_m=100, pitch_width_m=64)
+    db_session.add(cal)
+    await db_session.flush()
+    s.calibration_id, s.status = cal.id, "uploading"
+    await db_session.flush()
+    assert (await client.patch(url, json={"sprint_threshold_kmh": 21}, headers=headers)).status_code == 200
+    assert sessions_queue.jobs == []  # nothing processed yet: the first run uses the new threshold
+    for i, status in enumerate(("queued", "processing", "ready")):
+        s.status = status
+        await db_session.flush()
+        assert (await client.patch(url, json={"sprint_threshold_kmh": 22 + i}, headers=headers)).status_code == 200
+    assert [j.func_name for j in sessions_queue.jobs] == ["app.worker.session_jobs.compute_session_metrics"] * 3

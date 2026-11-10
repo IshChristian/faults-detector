@@ -225,3 +225,42 @@ async def test_job_temp_files_live_under_the_media_root(client, db_session, tena
     await _run(db_session, media_storage, s)
     assert s.status == "ready" and len(seen) == 2
     assert all(p.is_relative_to(media_storage.root / "_tmp") for p in seen)
+
+
+async def test_calibration_saved_mid_run_ends_in_a_calibrated_summary(client, db_session, tenant, media_storage,
+                                                                      tmp_path, monkeypatch):
+    # The worker loaded the session before the coach saved a calibration; the end-of-run metrics must see it.
+    import app.worker.session_jobs as jobs
+    from sqlalchemy import update
+
+    from app.models import Calibration
+    from tests.test_calibration_api import IMG, PITCH
+
+    s, _ = await _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=1)
+    cal = Calibration(customer_id=s.customer_id, camera_id=s.source_id, image_points=IMG, pitch_points=PITCH,
+                      pitch_length_m=100, pitch_width_m=64)
+    db_session.add(cal)
+    await db_session.flush()
+    real_list_videos, calls = jobs.list_videos, []
+
+    async def list_videos(db, sid):
+        calls.append(sid)
+        if len(calls) == 1:  # another transaction saves the calibration while the job is running
+            await db.execute(update(Session).where(Session.id == sid).values(calibration_id=cal.id)
+                             .execution_options(synchronize_session=False))
+        return await real_list_videos(db, sid)
+
+    monkeypatch.setattr(jobs, "list_videos", list_videos)
+    await _run(db_session, media_storage, s)
+    assert s.status == "ready" and s.calibration_id == cal.id
+    assert json.loads(media_storage.open(s.summary_key).read())["calibrated"] is True
+
+
+async def test_metrics_job_without_tracks_is_a_no_op(client, db_session, tenant, media_storage, tmp_path):
+    # A calibration saved while the session is queued enqueues metrics; if processing failed there are no tracks.
+    s, _ = await _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=1)
+    s.status, s.error = "failed", "boom"
+    await db_session.flush()
+    await compute_metrics_core(db_session, media_storage, s.id)
+    await db_session.refresh(s)
+    assert s.status == "failed" and s.error == "boom" and s.summary_key is None

@@ -201,3 +201,14 @@ async def test_frame_is_extracted_under_the_media_root(client, db_session, tenan
     assert (await client.get(f"/api/v1/sessions/{sid}/videos/{video.id}/frame?t_ms=0", headers=headers)
             ).status_code == 200
     assert len(seen) == 1 and seen[0].is_relative_to(media_storage.root / "_tmp")
+
+
+async def test_calibration_while_queued_or_processing_enqueues_metrics(client, db_session, tenant, sessions_queue):
+    # The single sessions worker runs the metrics job after process_session, so the summary ends up calibrated.
+    _, _, _, sid, headers = await _session(client, db_session, tenant)
+    s = await db_session.get(Session, uuid.UUID(sid))
+    for status in ("queued", "processing"):
+        s.status = status
+        await db_session.flush()
+        assert (await _calibrate(client, headers, sid)).status_code == 201
+    assert [j.func_name for j in sessions_queue.jobs] == ["app.worker.session_jobs.compute_session_metrics"] * 2

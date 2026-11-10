@@ -76,9 +76,9 @@ async def update_session(session_id: uuid.UUID, body: SessionUpdate, request: Re
     await record_audit(db, action="session.update", customer_id=s.customer_id, actor=user, entity_type="session",
                        entity_id=s.id, details={"fields": sorted(changes)}, ip=client_ip(request))
     detail = await service.session_detail(db, s)
-    if threshold_changed and s.status == "ready" and s.calibration_id is not None:
+    if threshold_changed and s.status in service.METRICS_RECOMPUTE and s.calibration_id is not None:
         await db.commit()  # the worker must see the new threshold
-        queue.enqueue("app.worker.session_jobs.compute_session_metrics", str(s.id))
+        service.enqueue_metrics(queue, s)
     return detail
 
 

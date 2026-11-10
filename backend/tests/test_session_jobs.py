@@ -201,3 +201,27 @@ async def test_analysis_reads_the_original_not_the_720p_proxy(client, db_session
     assert seen == [(media_storage.local_path(v.original_key), 1080)]
     await db_session.refresh(v)
     assert probe(media_storage.local_path(v.proxy_key)).height == 720  # the proxy is for playback only
+
+
+async def test_job_temp_files_live_under_the_media_root(client, db_session, tenant, media_storage, tmp_path,
+                                                        monkeypatch):
+    # The proxy and parquet are imported by rename; a /tmp scratch dir is another filesystem in Docker (EXDEV).
+    import app.worker.session_jobs as jobs
+
+    s, _ = await _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=1)
+    seen = []
+    real_transcode, real_write = jobs.transcode_proxy, jobs.write_tracks
+
+    def transcode(src, dest, *a, **kw):
+        seen.append(dest)
+        return real_transcode(src, dest, *a, **kw)
+
+    def write(table, dest):
+        seen.append(dest)
+        return real_write(table, dest)
+
+    monkeypatch.setattr(jobs, "transcode_proxy", transcode)
+    monkeypatch.setattr(jobs, "write_tracks", write)
+    await _run(db_session, media_storage, s)
+    assert s.status == "ready" and len(seen) == 2
+    assert all(p.is_relative_to(media_storage.root / "_tmp") for p in seen)

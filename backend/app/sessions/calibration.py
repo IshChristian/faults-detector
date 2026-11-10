@@ -1,4 +1,3 @@
-import tempfile
 import uuid
 from pathlib import Path
 
@@ -19,6 +18,7 @@ from app.models import Calibration, Camera, Session, SessionVideo
 from app.sessions import service
 from app.sessions.schemas import SessionDetail
 from app.storage.base import Storage, get_storage
+from app.storage.local import scratch_dir
 from app.storage.signing import sign_media_url
 from app.tenancy.scoping import get_scoped_or_404, scoped
 from app.video.ffmpeg import VideoError, extract_frame
@@ -103,7 +103,7 @@ async def get_frame(session_id: uuid.UUID, video_id: uuid.UUID, t_ms: int = Quer
         src = storage.local_path(video.original_key)
         if src is None:
             raise not_found("video file")
-        with tempfile.TemporaryDirectory() as tmp:
+        with scratch_dir() as tmp:
             dest = Path(tmp) / "frame.jpg"
             try:
                 extract_frame(src, t_ms, dest)

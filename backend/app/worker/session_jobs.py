@@ -4,7 +4,6 @@ import asyncio
 import io
 import json
 import re
-import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +24,7 @@ from app.config import get_settings
 from app.models import Calibration, Session, SessionTrack, SessionVideo
 from app.sessions.service import list_videos, session_prefix
 from app.storage.base import Storage, get_storage
+from app.storage.local import scratch_dir
 from app.video.ffmpeg import transcode_proxy
 from app.worker.runtime import run_async
 
@@ -104,7 +104,7 @@ async def _process(db: AsyncSession, storage: Storage, detector: Detector, s: Se
             raise RuntimeError("the original video is not available on local storage")
         proxy_key = f"{prefix}/proxy/{video.id}.mp4"
         await set_stage("transcoding")
-        with tempfile.TemporaryDirectory() as tmp:
+        with scratch_dir() as tmp:
             dest = Path(tmp) / "proxy.mp4"
             await asyncio.to_thread(transcode_proxy, src, dest,
                                     threadsafe(done, weight, 0.0, TRANSCODE_SHARE))
@@ -141,7 +141,7 @@ async def _process(db: AsyncSession, storage: Storage, detector: Detector, s: Se
     teams = assign_teams({tid: torso_feature(torso.get(tid, [])) for tid in person_ids}, frames_count)
 
     tracks_key, _ = _keys(prefix)
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_dir() as tmp:
         write_tracks(table, Path(tmp) / "tracks.parquet")
         storage.import_file(tracks_key, Path(tmp) / "tracks.parquet")
 

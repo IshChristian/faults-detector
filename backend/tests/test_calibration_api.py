@@ -183,3 +183,21 @@ async def test_viewer_can_get_frame(client, db_session, tenant, tmp_path, make_u
     r = await client.get(f"/api/v1/sessions/{sid}/videos/{video.id}/frame", headers=viewer)
     assert r.status_code == 200
 
+
+
+async def test_frame_is_extracted_under_the_media_root(client, db_session, tenant, tmp_path, media_storage,
+                                                       monkeypatch):
+    # Extracting into /tmp and renaming into the media volume fails across filesystems (EXDEV) in Docker.
+    sid, video, headers, _ = await _uploaded(client, db_session, tenant, tmp_path)
+    import app.sessions.calibration as mod
+
+    seen, real = [], mod.extract_frame
+
+    def spy(src, t_ms, dest):
+        seen.append(dest)
+        return real(src, t_ms, dest)
+
+    monkeypatch.setattr(mod, "extract_frame", spy)
+    assert (await client.get(f"/api/v1/sessions/{sid}/videos/{video.id}/frame?t_ms=0", headers=headers)
+            ).status_code == 200
+    assert len(seen) == 1 and seen[0].is_relative_to(media_storage.root / "_tmp")

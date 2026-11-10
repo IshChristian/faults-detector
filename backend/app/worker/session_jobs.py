@@ -113,10 +113,9 @@ async def _process(db: AsyncSession, storage: Storage, detector: Detector, s: Se
         await db.commit()
 
         await set_stage("analysing")
-        proxy_path = storage.local_path(proxy_key)
-        assert proxy_path is not None
+        # Analysis reads the original: calibration points are picked on its frames, and the proxy is for playback.
         result = await asyncio.to_thread(
-            analyse_video, proxy_path, str(video.id), detector, sample_fps, t_offset_ms, next_track_id,
+            analyse_video, src, str(video.id), detector, sample_fps, t_offset_ms, next_track_id,
             tile_far_half, threadsafe(done, weight, TRANSCODE_SHARE, ANALYSE_SHARE))
         tables.append(result.table)
         for tid, crops in result.torso_samples.items():

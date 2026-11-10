@@ -23,13 +23,13 @@ class RaisingDetector:
         raise RuntimeError("model exploded reading /srv/media/secret/clip.mp4\nTraceback (most recent call last):\n  File x")
 
 
-async def _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=2, declared_ms=None):
+async def _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=2, declared_ms=None, size="320x180"):
     customer, _, headers = await tenant("operator")
     site, cam = await _site_with_camera(db_session, customer)
     sid = uuid.UUID((await _create(client, headers, site, cam))["id"])
     s = await db_session.get(Session, sid)
     for i in range(n_videos):
-        clip = make_clip(tmp_path / f"c{i}.mp4", seconds=2, size="320x180", fps=25,
+        clip = make_clip(tmp_path / f"c{i}.mp4", seconds=2, size=size, fps=25,
                          creation_time=f"2026-11-01T09:0{i}:00Z")
         info = probe(clip)
         vid = uuid.uuid4()
@@ -180,3 +180,24 @@ async def test_summary_endpoint_409_until_ready_then_signed_proxy_urls(client, d
     assert len(items) == 4 and {t["cls"] for t in items} == {"person"}
     assert set(items[0]) == {"track_id", "cls", "team", "team_corrected", "on_pitch", "frames_count", "first_ms",
                              "last_ms", "metrics"}
+
+
+async def test_analysis_reads_the_original_not_the_720p_proxy(client, db_session, tenant, media_storage, tmp_path,
+                                                              monkeypatch):
+    # Calibration points are picked on the original, so tracks must come from the original's pixels.
+    import app.worker.session_jobs as jobs
+
+    s, _ = await _setup(client, db_session, tenant, media_storage, tmp_path, n_videos=1, size="1920x1080")
+    (v,) = await _videos(db_session, s.id)
+    seen = []
+    real = jobs.analyse_video
+
+    def spy(path, *args, **kw):
+        seen.append((path, probe(path).height))
+        return real(path, *args, **kw)
+
+    monkeypatch.setattr(jobs, "analyse_video", spy)
+    await _run(db_session, media_storage, s)
+    assert seen == [(media_storage.local_path(v.original_key), 1080)]
+    await db_session.refresh(v)
+    assert probe(media_storage.local_path(v.proxy_key)).height == 720  # the proxy is for playback only

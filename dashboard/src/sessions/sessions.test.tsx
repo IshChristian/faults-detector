@@ -3,9 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App";
-import { setAccessToken } from "../api/client";
+import { getAccessToken, setAccessToken } from "../api/client";
 import { API, coach, problem, server, type TestUser } from "../test/server";
-import { uploadFile } from "./api";
+import { SIGN_IN_EXPIRED, uploadFile } from "./api";
 
 type FakeOptions = {
   headers?: Record<string, string>;
@@ -14,7 +14,8 @@ type FakeOptions = {
   endpoint: string;
   metadata: Record<string, string>;
   removeFingerprintOnSuccess: boolean;
-  onBeforeRequest?: (req: { setHeader(name: string, value: string): void }) => void;
+  onBeforeRequest?: (req: { setHeader(name: string, value: string): void }) => void | Promise<void>;
+  onShouldRetry?: (err: { originalResponse?: { getStatus(): number } }, attempt: number) => boolean;
   onProgress?: (sent: number, total: number) => void;
   onSuccess?: () => void;
   onError?: (err: Error) => void;
@@ -383,3 +384,79 @@ test("uploadFile resumes a previous upload and sends the current token on every 
   expect(seen).toEqual(["Authorization=Bearer token-1", "Authorization=Bearer token-2"]);
 });
 
+
+function jwt(expInSeconds: number) {
+  const b64 = (o: object) => btoa(JSON.stringify(o)).replace(/=+$/, "");
+  return `${b64({ alg: "none" })}.${b64({ exp: Math.floor(Date.now() / 1000) + expInSeconds })}.sig`;
+}
+
+async function startUpload(onError = vi.fn()) {
+  uploadFile("s-1", new File(["x"], "clip.mp4", { type: "video/mp4" }), {
+    onProgress: () => {},
+    onError,
+    onSuccess: () => {},
+  });
+  await waitFor(() => expect(tus.uploads[0]?.started).toBe(true));
+  return tus.uploads[0];
+}
+
+function refreshReturns(token: string | null) {
+  let calls = 0;
+  server.use(
+    http.post(`${API}/auth/refresh`, () => {
+      calls += 1;
+      return token
+        ? HttpResponse.json({ access_token: token, refresh_token: "r", token_type: "bearer", user: coach })
+        : problem(401, "invalid-refresh-token", "Session expired");
+    }),
+  );
+  return () => calls;
+}
+
+test("an expired or near-expiry token is refreshed once, shared by parallel uploads, and the new token is sent", async () => {
+  const fresh = jwt(900);
+  const calls = refreshReturns(fresh);
+  setAccessToken(jwt(30)); // inside the 60 s margin
+  const first = await startUpload();
+  uploadFile("s-1", new File(["y"], "b.mp4", { type: "video/mp4" }), { onProgress() {}, onError() {}, onSuccess() {} });
+  await waitFor(() => expect(tus.uploads[1]?.started).toBe(true));
+  const seen: string[] = [];
+  const req = { setHeader: (_n: string, v: string) => seen.push(v) };
+  await Promise.all([first.options.onBeforeRequest?.(req), tus.uploads[1].options.onBeforeRequest?.(req)]);
+  expect(calls()).toBe(1);
+  expect(seen).toEqual([`Bearer ${fresh}`, `Bearer ${fresh}`]);
+  expect(getAccessToken()).toBe(fresh);
+});
+
+test("a 401 is retried and the retry goes out with a refreshed token", async () => {
+  const fresh = jwt(900);
+  const calls = refreshReturns(fresh);
+  setAccessToken(jwt(900));
+  const upload = await startUpload();
+  const err = { originalResponse: { getStatus: () => 401 } };
+  expect(upload.options.onShouldRetry?.(err, 0)).toBe(true);
+  expect(upload.options.onShouldRetry?.({ originalResponse: { getStatus: () => 403 } }, 0)).toBe(false);
+  expect(upload.options.onShouldRetry?.({ originalResponse: { getStatus: () => 500 } }, 0)).toBe(true);
+  expect(upload.options.onShouldRetry?.({ originalResponse: { getStatus: () => 409 } }, 0)).toBe(true);
+
+  // The server rejected the token: the app's token is replaced (as after a refresh) and the retry must use it.
+  setAccessToken(jwt(5));
+  const seen: string[] = [];
+  await upload.options.onBeforeRequest?.({ setHeader: (_n, v) => seen.push(v) });
+  expect(calls()).toBe(1);
+  expect(seen).toEqual([`Bearer ${fresh}`]);
+});
+
+test("a failed refresh surfaces the sign-in message instead of retrying", async () => {
+  refreshReturns(null);
+  setAccessToken(jwt(-10));
+  const onError = vi.fn();
+  const upload = await startUpload(onError);
+  await expect(upload.options.onBeforeRequest?.({ setHeader() {} })).rejects.toThrow(SIGN_IN_EXPIRED);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError.mock.calls[0][0].message).toBe(SIGN_IN_EXPIRED);
+  expect(upload.abort).toHaveBeenCalled();
+  expect(upload.options.onShouldRetry?.({ originalResponse: { getStatus: () => 401 } }, 0)).toBe(false);
+  upload.options.onError?.(new Error("late"));
+  expect(onError).toHaveBeenCalledTimes(1);
+});

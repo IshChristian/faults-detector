@@ -1,5 +1,5 @@
 import { Upload } from "tus-js-client";
-import { apiFetch, getAccessToken } from "../api/client";
+import { apiFetch, getAccessToken, refreshSession } from "../api/client";
 
 export type Page<T> = { items: T[]; next_cursor: string | null };
 
@@ -72,24 +72,54 @@ export type UploadCallbacks = {
   onSuccess: () => void;
 };
 
+const REFRESH_MARGIN_S = 60;
+export const SIGN_IN_EXPIRED = "Your sign-in expired. Sign in again and re-select the file to resume.";
+
+/** True when there is no token, or its JWT `exp` is within the refresh margin. Undecodable tokens count as valid. */
+function needsRefresh(token: string | null): boolean {
+  if (!token) return true;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return typeof payload.exp === "number" && payload.exp - Date.now() / 1000 < REFRESH_MARGIN_S;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Start (or resume) a resumable tus upload. The Authorization header is set per request from
  * the current in-memory token, so a long upload keeps working across access-token refreshes.
  * Re-selecting the same file resumes the earlier upload via tus's stored fingerprint.
  */
 export function uploadFile(sessionId: string, file: File, cb: UploadCallbacks): Upload {
-  const upload = new Upload(file, {
+  let signedOut = false;
+  const upload: Upload = new Upload(file, {
     endpoint: "/api/v1/uploads",
     chunkSize: 8 * 1024 * 1024,
     retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
     metadata: { session_id: sessionId, filename: file.name },
     removeFingerprintOnSuccess: true,
-    onBeforeRequest(req) {
+    async onBeforeRequest(req) {
+      // The access token lives ~15 min; long uploads must refresh it (concurrent refreshes are shared).
+      if (needsRefresh(getAccessToken()) && !(await refreshSession())) {
+        signedOut = true;
+        void upload.abort();
+        cb.onError(new Error(SIGN_IN_EXPIRED));
+        throw new Error(SIGN_IN_EXPIRED);
+      }
       const token = getAccessToken();
       if (token) req.setHeader("Authorization", `Bearer ${token}`);
     },
+    onShouldRetry(err) {
+      if (signedOut) return false;
+      const status = err.originalResponse ? err.originalResponse.getStatus() : 0;
+      if (status === 401) return true; // the token expired mid-request; onBeforeRequest refreshes it
+      return (status < 400 || status >= 500 || status === 409 || status === 423) && navigator.onLine;
+    },
     onProgress: cb.onProgress,
-    onError: cb.onError,
+    onError: (err) => {
+      if (!signedOut) cb.onError(err);
+    },
     onSuccess: cb.onSuccess,
   });
   void upload.findPreviousUploads().then((previous) => {
